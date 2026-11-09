@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/driftwatch-agent ./cmd/driftwatch-agent
 
-FROM ubuntu:24.04
+FROM ubuntu:25.10
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server cron \
  && rm -rf /var/lib/apt/lists/*
