@@ -1,0 +1,11 @@
+# Only what the build needs goes into the context.
+node_modules
+dist
+coverage
+.vite
+*.log
+*.local
+.env*
+Dockerfile
+.dockerignore
+README.md

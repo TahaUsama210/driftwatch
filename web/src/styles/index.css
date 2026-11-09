@@ -1,0 +1,132 @@
+@import 'tailwindcss';
+
+/*
+ * Dark mode follows the OS unless the viewer picked a theme with the toggle, which
+ * stamps data-theme on <html>. The variant covers both, so every dark token below is
+ * declared once and applies to the media query and the explicit choice alike.
+ */
+@custom-variant dark {
+  &:where([data-theme='dark'], [data-theme='dark'] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:not([data-theme='light'], [data-theme='light'] *)) {
+      @slot;
+    }
+  }
+}
+
+/*
+ * Design tokens. Tailwind's default palette is removed so components can only use
+ * these roles. Status colours (good/warning/serious/critical) are fixed across themes
+ * and reserved for state; the -ink variants are the same hues stepped for >= 4.5:1
+ * text/icon contrast on every surface, and -soft variants are badge washes.
+ */
+@theme {
+  --color-*: initial;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --color-page: #f3f3f0;
+  --color-surface: #fcfcfb;
+  --color-sunken: #f6f6f3;
+  --color-border: #e1e0d9;
+  --color-border-strong: #8c8b83;
+
+  --color-ink: #0b0b0b;
+  --color-ink-secondary: #52514e;
+  --color-ink-muted: #696863;
+
+  --color-brand: #1f64b8;
+  --color-on-brand: #ffffff;
+  --color-accent: #1f64b8;
+  --color-accent-soft: color-mix(in oklab, var(--color-accent) 10%, var(--color-surface));
+  --color-focus: #2a78d6;
+
+  --color-good: #0ca30c;
+  --color-good-ink: #006300;
+  --color-good-soft: color-mix(in oklab, var(--color-good) 12%, var(--color-surface));
+  --color-warning: #fab219;
+  --color-warning-ink: #7a5600;
+  --color-warning-soft: color-mix(in oklab, var(--color-warning) 16%, var(--color-surface));
+  --color-serious: #ec835a;
+  --color-serious-ink: #a8481f;
+  --color-serious-soft: color-mix(in oklab, var(--color-serious) 14%, var(--color-surface));
+  --color-critical: #d03b3b;
+  --color-critical-ink: #b02a2a;
+  --color-critical-soft: color-mix(in oklab, var(--color-critical) 10%, var(--color-surface));
+  --color-neutral: #8c8b83;
+  --color-neutral-ink: #52514e;
+  --color-neutral-soft: color-mix(in oklab, var(--color-neutral) 14%, var(--color-surface));
+
+  --color-series-1: #2a78d6;
+  --color-grid: #e1e0d9;
+  --color-axis: #c3c2b7;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+
+    @variant dark {
+      color-scheme: dark;
+
+      --color-page: #121211;
+      --color-surface: #1a1a19;
+      --color-sunken: #222220;
+      --color-border: #2f2f2c;
+      --color-border-strong: #6f6e68;
+
+      --color-ink: #f0efec;
+      --color-ink-secondary: #c3c2b7;
+      --color-ink-muted: #9c9b93;
+
+      --color-accent: #7cb0ee;
+      --color-accent-soft: color-mix(in oklab, var(--color-accent) 14%, var(--color-surface));
+      --color-focus: #5598e7;
+
+      --color-good-ink: #3cc23c;
+      --color-good-soft: color-mix(in oklab, var(--color-good) 18%, var(--color-surface));
+      --color-warning-ink: #fbc24a;
+      --color-warning-soft: color-mix(in oklab, var(--color-warning) 16%, var(--color-surface));
+      --color-serious-ink: #f29a74;
+      --color-serious-soft: color-mix(in oklab, var(--color-serious) 18%, var(--color-surface));
+      --color-critical-ink: #f07a7a;
+      --color-critical-soft: color-mix(in oklab, var(--color-critical) 20%, var(--color-surface));
+      --color-neutral: #6f6e68;
+      --color-neutral-ink: #c3c2b7;
+      --color-neutral-soft: color-mix(in oklab, var(--color-neutral) 22%, var(--color-surface));
+
+      --color-series-1: #3987e5;
+      --color-grid: #2c2c2a;
+      --color-axis: #383835;
+    }
+  }
+
+  html {
+    background-color: var(--color-page);
+    color: var(--color-ink);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100dvh;
+    background-color: var(--color-page);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+}
