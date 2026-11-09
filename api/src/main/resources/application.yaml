@@ -1,0 +1,55 @@
+# Every setting that varies between environments is read from the environment variables
+# documented in docs/CONTRACTS.md; the defaults below target local development.
+spring:
+  application:
+    name: driftwatch-api
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:35433/driftwatch}
+    username: ${DB_USER:driftwatch}
+    password: ${DB_PASSWORD:driftwatch}
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+driftwatch:
+  # Required, at least 24 characters; startup fails without it.
+  enrollment-token: ${DRIFTWATCH_ENROLLMENT_TOKEN:}
+  stale-after: ${DRIFTWATCH_STALE_AFTER:PT5M}
+  cors-origins: ${DRIFTWATCH_CORS_ORIGINS:}
+  metrics-refresh-interval: PT15S
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        liveness:
+          include: livenessState
+        # Not ready to take traffic while the database is unreachable.
+        readiness:
+          include: readinessState, db
+
+# The OpenAPI document and Swagger UI are deliberately public (docs/CONTRACTS.md); enabling them
+# explicitly also documents that choice and silences springdoc's "enabled by default" warning.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: driftwatch-api

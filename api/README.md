@@ -1,0 +1,235 @@
+# Driftwatch API
+
+Spring Boot 4.1 / Java 25 service that enrolls hosts, ingests their compliance scans, scores them,
+records drift between consecutive scans, and serves the read models behind the dashboard.
+
+The HTTP contract is [`../contracts/openapi.yaml`](../contracts/openapi.yaml); domain rules (scoring,
+drift directions, limits) are in [`../docs/CONTRACTS.md`](../docs/CONTRACTS.md). Every response in the
+integration test suite is validated against the OpenAPI file, so the build fails when the code and the
+contract disagree.
+
+## Architecture
+
+```
+agent ──POST /agents/enroll──▶ ┌──────────────────────── driftwatch-api ───────────────────────┐
+      ──POST /scans─────────▶  │ filters: request id → ingest outcome metric → 1 MiB limit      │
+                               │ Spring Security: bearer token per agent endpoint, GETs public │
+dashboard ──GET /api/v1/**──▶  │ controllers → services (ingest, drift, fleet) → JdbcClient SQL │──▶ Postgres 18
+Prometheus ──/actuator/──────▶ │ Actuator: liveness, readiness (incl. DB), Prometheus metrics  │    (Flyway)
+                               └───────────────────────────────────────────────────────────────┘
+```
+
+Code is organised by feature under `io.github.tahausama210.driftwatch`:
+
+| Package | Responsibility |
+|---|---|
+| `enrollment` | `POST /api/v1/agents/enroll`: upsert host by machine id, issue and rotate agent tokens |
+| `ingest` | `POST /api/v1/scans`: validation, idempotency, scoring, the ingest transaction, ingest metrics |
+| `drift` | drift direction rules, event persistence, `GET /hosts/{id}/drift`, `GET /events` |
+| `hosts` | host list (filter, sort, page), host detail, scan history, ONLINE/STALE policy |
+| `scans` | scan summary/detail read models |
+| `checks` | check catalog upsert and per-check fleet status |
+| `fleet` | fleet summary, score trend, scheduled fleet gauges |
+| `security` | bearer-token authentication, token generation and hashing, CORS |
+| `common` | RFC 9457 error handling, request id and body-limit filters, JDBC helpers |
+| `config` | typed, validated configuration; clock; OpenAPI metadata; filter ordering |
+
+There are no package cycles: `common` and `config` depend on nothing else, and the features depend on
+each other in one direction only (`checks` ← `scans` ← `hosts` ← `drift` ← `ingest`; `fleet` reads
+`checks` and `hosts`; `enrollment` uses `hosts` and `security`).
+
+## Endpoints
+
+| Method and path | Auth | Purpose |
+|---|---|---|
+| `POST /api/v1/agents/enroll` | enrollment token | `201` new host, `200` re-enrolled (token rotated) |
+| `POST /api/v1/scans` | agent token | `201` stored, `200` duplicate `scanId`, `409` scan id owned by another host, `413` body over 1 MiB |
+| `GET /api/v1/fleet/summary` | public | host counts, average score, critical failures, top 5 failing checks |
+| `GET /api/v1/fleet/trend?hours&bucketMinutes` | public | carried-forward average per epoch-aligned bucket, at most 500 points |
+| `GET /api/v1/hosts?query&status&sort&direction&page&size` | public | paged host list with latest scan |
+| `GET /api/v1/hosts/{hostId}` | public | one host with latest scan |
+| `GET /api/v1/hosts/{hostId}/scans?limit` | public | scan history, newest first |
+| `GET /api/v1/hosts/{hostId}/drift?from&to` | public | changes between two scans (defaults: latest vs. previous) |
+| `GET /api/v1/scans/{scanId}` | public | scan with all results, by category then check id |
+| `GET /api/v1/checks`, `GET /api/v1/checks/{checkId}` | public | catalog with status counts across latest scans; per-host status |
+| `GET /api/v1/events?hostId&direction&limit` | public | drift event feed, newest first |
+| `GET /actuator/health/liveness`, `/readiness`, `/actuator/prometheus` | public | probes and metrics |
+| `GET /v3/api-docs`, `/swagger-ui.html` | public | OpenAPI generated from the running code |
+
+Everything else is denied. All errors are `application/problem+json` (RFC 9457) with `type`, `title`,
+`status`, `detail`, `instance`, and for validation failures an `errors: [{field, message}]` array whose
+`field` is a path such as `results[3].checkId` or a query parameter name. Malformed UUIDs in a *path*
+are `404` (they cannot name a resource); malformed query parameters are `400`, as are URLs Spring
+Security's firewall rejects (e.g. containing `//` or `;`).
+
+## Data model
+
+Defined in [`V1__create_schema.sql`](src/main/resources/db/migration/V1__create_schema.sql), which
+explains each non-obvious choice inline.
+
+- **hosts**: identity (`machine_id` unique), SHA-256 `token_hash` (unique, used to authenticate),
+  current facts, `enrolled_at`, `last_seen_at`, and `latest_scan_id`, a denormalised pointer to the
+  newest scan.
+- **scans**: agent-generated id (the idempotency key), timestamps, status counts, and the score as
+  `numeric(4,1)`, `NULL` when nothing was applicable. Indexed on `(host_id, finished_at DESC, id DESC)`.
+- **scan_results**: one row per check per scan, primary key `(scan_id, check_id)`.
+- **checks**: catalog upserted from reports; title, category and severity of each check.
+- **drift_events**: one row per changed check per scan, unique on `(scan_id, check_id)`, indexed for
+  the fleet feed and the per-host feed by `detected_at DESC`.
+
+Statuses, severities, categories and directions are `text` with `CHECK` constraints, and length limits
+mirror the contract's validation limits. Generated ids use Postgres 18's built-in `uuidv7()`.
+
+## Key decisions and tradeoffs
+
+**`JdbcClient`, not JPA.** Almost every read is an aggregate over "each host's latest scan": counts per
+status per check, averages, a carry-forward trend built with `generate_series` and `LATERAL` joins,
+`FILTER` clauses, row-value comparisons for "previous scan". Those are natural in SQL and awkward in
+JPQL or the Criteria API, and an entity graph would add lazy-loading and N+1 risks without giving
+anything back: there are no rich aggregates to load, mutate and flush. The write path also leans on
+Postgres features directly (`SELECT … FOR UPDATE`, `INSERT … ON CONFLICT`, multi-row inserts via
+`unnest` arrays). The cost is hand-written row mapping, which is kept in one place per read model
+(`ScanSummaryMapping`, `HostQueries.mapHost`, …). Queries that run more than one statement use a
+read-only `REPEATABLE READ` transaction so their numbers come from one snapshot (e.g. the host page and
+its `totalItems`).
+
+**Denormalised latest-scan pointer.** `hosts.latest_scan_id` turns "latest scan per host" into a
+primary-key join instead of a `DISTINCT ON` or window function over all scans. The cost is that ingest
+must keep it correct: it is only moved by a scan that is newer, by `(finished_at, id)`, than every
+stored scan of the host, and it is updated in the same transaction, under the host row lock.
+
+**Row lock for drift consistency.** Ingest starts with `SELECT … FROM hosts … FOR UPDATE`. Concurrent
+submissions for one host are therefore serialised, so each one computes drift against a previous scan
+that cannot change before it commits, and two scans can never both believe they are the newest. Scans
+of different hosts lock different rows and do not contend. The lock query also re-checks the token
+hash, which closes the window where a concurrent re-enrollment rotates the token after the request was
+authenticated. The catalog upsert writes only new or changed check definitions, in id order, so
+concurrent ingests do not queue on (or deadlock over) shared catalog rows.
+
+**Out-of-order scans.** A scan can arrive after a newer one (an agent's retry landing after its next
+interval's scan). It is stored and scored normally, its events are computed against its predecessor by
+`finishedAt`, and the events of its successor are deleted and re-derived against it. The invariant is
+`events(S) = diff(previous(S), S)` for every scan. A late scan does not move the latest-scan pointer or
+overwrite host facts, which would be older than what is stored, but it does update `lastSeenAt`. The
+drift-events counter counts only the submitted scan's events, not the re-derived replacements.
+
+**Idempotency.** The scan id is the primary key. Under the host lock, a scan id already stored for the
+same host returns `200` with the stored summary and writes nothing; one stored for another host is
+`409`. If another host inserts the same id concurrently, the primary-key violation is mapped to `409`.
+
+**Token handling.** Agent tokens are `dwa_` plus 32 bytes from `SecureRandom`, base64url without
+padding. Only the SHA-256 hex digest is stored; the token is returned once. An unsalted fast hash is
+appropriate here, unlike for passwords, because the input already has 256 bits of entropy. Agent
+tokens are looked up by digest through the unique index. The enrollment secret is compared with
+`MessageDigest.isEqual` on SHA-256 digests of both values, which is constant-time and hides the
+secret's length. Re-enrollment replaces the digest, so the previous token stops working when the
+transaction commits. Tokens are never logged, and the configuration and response records redact them
+in `toString()`. A missing or short enrollment secret fails startup without printing the value.
+
+**Public read API in phase 1.** `GET /api/v1/**` is unauthenticated, as the contract specifies, so the
+dashboard needs no login yet. Anyone who can reach the API can read fleet posture; phase 2 adds
+dashboard authentication. Writes stay locked down: only the two agent endpoints accept requests, each
+with exactly one kind of token. CSRF protection is disabled because the API keeps no session and
+authenticates writes only with an explicit `Authorization` header, which a cross-site page cannot make
+a browser attach. CORS allows `GET` from `DRIFTWATCH_CORS_ORIGINS` only.
+
+**Request body limit.** A filter rejects a declared `Content-Length` over 1 MiB before reading, and
+counts bytes for chunked bodies, failing the read once the limit is crossed. Both paths return `413`.
+
+## Observability
+
+- Structured JSON logs (Boot's ECS format) on stdout. Every line logged during a request carries
+  `requestId`, taken from a safe `X-Request-Id` header or generated, and echoed in the response.
+- Metrics at `/actuator/prometheus`: `driftwatch_scans_ingested_total{outcome}` (created, duplicate,
+  rejected), `driftwatch_scan_ingest_duration_seconds` (histogram), `driftwatch_drift_events_total{direction}`,
+  `driftwatch_hosts{status}`, `driftwatch_fleet_average_score`, plus Boot's HTTP server metrics. The
+  fleet gauges are recomputed every `driftwatch.metrics-refresh-interval` (15 s) by a scheduled task,
+  so scrapes never query the database.
+- `/actuator/health/liveness` (process only) and `/actuator/health/readiness` (includes the database).
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DB_URL` | `jdbc:postgresql://localhost:35433/driftwatch` | JDBC URL |
+| `DB_USER` / `DB_PASSWORD` | `driftwatch` / `driftwatch` | database credentials |
+| `DRIFTWATCH_ENROLLMENT_TOKEN` | none | required, at least 24 characters |
+| `DRIFTWATCH_STALE_AFTER` | `PT5M` | a host is `STALE` when its last contact is older |
+| `DRIFTWATCH_CORS_ORIGINS` | empty | comma-separated browser origins |
+| `SERVER_PORT` | `8080` | HTTP port |
+
+## Running locally
+
+Start a private database (port 35433, so it never clashes with anything on 5432):
+
+```sh
+docker run -d --name driftwatch-dev-db -p 35433:5432 \
+  -e POSTGRES_USER=driftwatch -e POSTGRES_PASSWORD=driftwatch -e POSTGRES_DB=driftwatch \
+  postgres:18-alpine
+```
+
+Run the API on port 8480 (Flyway creates the schema on startup):
+
+```sh
+# Linux/macOS/Git Bash
+DRIFTWATCH_ENROLLMENT_TOKEN=dev-enrollment-token-0123456789abcdef SERVER_PORT=8480 ./mvnw spring-boot:run
+```
+
+```powershell
+# PowerShell
+$env:DRIFTWATCH_ENROLLMENT_TOKEN = 'dev-enrollment-token-0123456789abcdef'; $env:SERVER_PORT = '8480'; .\mvnw.cmd spring-boot:run
+```
+
+Then open `http://localhost:8480/swagger-ui.html`, or enroll from the shell:
+
+```sh
+curl -s -X POST localhost:8480/api/v1/agents/enroll \
+  -H 'Authorization: Bearer dev-enrollment-token-0123456789abcdef' -H 'Content-Type: application/json' \
+  -d '{"machineId":"dev-machine-01","agentVersion":"0.1.0","hostname":"dev-01","os":{"id":"ubuntu","version":"24.04","prettyName":"Ubuntu 24.04 LTS"},"kernel":"6.8.0","arch":"amd64"}'
+```
+
+## Tests and build
+
+```sh
+./mvnw -B verify      # Windows: .\mvnw.cmd -B verify
+```
+
+This is the single CI command. It compiles with `-Xlint:all -Werror`, runs the unit tests (Surefire,
+`*Test`) and the integration tests (Failsafe, `*IT`), writes a merged JaCoCo report to
+`target/site/jacoco/jacoco.xml`, and checks formatting (Spotless with palantir-java-format; run
+`./mvnw spotless:apply` to fix). The integration tests need Docker: Testcontainers starts
+`postgres:18.4-alpine` on a random port, and all `*IT` classes share one application context and one
+container.
+
+- **Unit tests** cover the score formula with worked examples (including half-up rounding cases where
+  half-even would differ), the full drift direction table, token generation and hashing, bearer
+  parsing and the enrollment comparison, configuration fail-fast, trend bucket alignment and the
+  500-point cap, cross-field scan validation, the body-limit filter, and problem rendering for paths
+  the running app cannot easily reach (`403`, `500`).
+- **Integration tests** drive every endpoint through MockMvc against a real Postgres: auth failures,
+  enrollment and token rotation, created/duplicate/conflict ingest, validation errors with field
+  paths, `413` (declared length, and chunked over real HTTP), drift across consecutive and
+  out-of-order scans, fleet summary and trend numbers, `STALE` via a controllable `Clock`, paging,
+  sorting and filtering, CORS, request ids, probes and metrics.
+- **Contract test**: `support/OpenApiContract` validates every integration-test response (status,
+  media type, body schema) against `../contracts/openapi.yaml` using Atlassian's
+  `openapi-request-validator-core`. `OpenApiContractTest` proves the check fails on violations. One
+  narrowly scoped exception is documented in that class: the validator's strict
+  `additionalProperties` handling misfires on `allOf` schemas, so for the three `allOf` responses
+  (`ScanDetail`, `CheckDetail`, `DriftEvent`) undocumented properties are caught instead by tests
+  that assert their exact property names.
+- **Concurrency tests** make the two races the host row lock guards against deterministic: a token
+  rotated by a re-enrollment while a submission waits for the lock (`401`), and the same scan id
+  committed by another host mid-ingest (`409`).
+
+## Docker
+
+```sh
+docker build -t driftwatch-api:dev api     # from the repository root
+```
+
+Multi-stage: the Maven Wrapper builds the jar with a BuildKit cache mount for `~/.m2` (tests are
+skipped; CI runs them), Boot's jar tools split it into dependency, loader, snapshot and application
+layers, and the runtime stage is `eclipse-temurin:25.0.4_7-jre-alpine`. The process runs as UID 10001,
+needs no Linux capabilities, listens on 8080, sizes the heap with `-XX:MaxRAMPercentage=75`, and has a
+`HEALTHCHECK` using busybox `wget` against the readiness probe.

@@ -1,0 +1,13 @@
+# Only the wrapper, pom.xml and src/ are needed to build the image.
+target/
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+.factorypath
+*.log
+Dockerfile
+.dockerignore
+README.md
