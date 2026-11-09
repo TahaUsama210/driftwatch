@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -o /out/driftwatch-agent ./cmd/driftwatch-agent
 
 # Pinned to a point release (debian:12 moves with every one).
-FROM debian:12.14
+FROM debian:13.6
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server cron \
  && rm -rf /var/lib/apt/lists/*
