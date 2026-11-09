@@ -13,7 +13,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime ----------------------------------------------------------------
-FROM nginxinc/nginx-unprivileged:1.30.6-alpine3.24
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine3.24
 
 # API_UPSTREAM: where /api/ and /actuator/health are proxied.
 # DNS_RESOLVER: Docker's embedded DNS; override when running outside Docker networks.
