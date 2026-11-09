@@ -1,0 +1,3 @@
+# Normalize to LF in the repository and in working trees on every platform, so
+# files copied into Linux images (and gofmt) never see CRLF.
+* text=auto eol=lf

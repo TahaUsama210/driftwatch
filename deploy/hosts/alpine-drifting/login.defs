@@ -1,0 +1,12 @@
+#
+# /etc/login.defs - password aging policy for shadow-utils (useradd, passwd, chage).
+#
+# Maximum number of days a password may be used.
+PASS_MAX_DAYS	180
+# Minimum number of days allowed between password changes.
+PASS_MIN_DAYS	1
+# Number of days of warning given before a password expires.
+PASS_WARN_AGE	14
+
+UMASK		027
+ENCRYPT_METHOD	SHA512

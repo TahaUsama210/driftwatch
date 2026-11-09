@@ -1,0 +1,9 @@
+# The build context is the repository root; send only the agent sources and
+# this host's files.
+*
+!agent/go.mod
+!agent/go.sum
+!agent/cmd/
+!agent/internal/
+agent/**/*_test.go
+!deploy/hosts/rocky-web/
