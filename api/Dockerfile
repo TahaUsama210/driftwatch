@@ -2,7 +2,7 @@
 # Build context: api/
 
 # ---- Build: compile with the Maven Wrapper and split the Boot jar into layers ----
-FROM eclipse-temurin:25.0.4_7-jdk-alpine AS build
+FROM eclipse-temurin:26.0.2.1_1-jdk-alpine AS build
 WORKDIR /workspace
 
 COPY --chmod=0755 mvnw ./
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.m2 \
  && java -Djarmode=tools -jar target/driftwatch-api-*.jar extract --layers --launcher --destination target/extracted
 
 # ---- Runtime: JRE only, unprivileged ----
-FROM eclipse-temurin:25.0.4_7-jre-alpine
+FROM eclipse-temurin:26.0.2.1_1-jre-alpine
 
 # A fixed, non-root UID/GID; the process needs no Linux capabilities (it binds 8080, above 1024),
 # so it runs unchanged with cap_drop: [ALL] and no-new-privileges.
