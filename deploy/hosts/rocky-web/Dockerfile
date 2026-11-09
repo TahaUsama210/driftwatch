@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # The Docker Hub library image "rockylinux" stopped receiving updates in 2024;
 # the Rocky project publishes rockylinux/rockylinux instead.
-FROM rockylinux/rockylinux:9.8
+FROM rockylinux/rockylinux:10.2
 RUN dnf install -y --setopt=install_weak_deps=False openssh-server crontabs \
  && dnf clean all \
  && rm -rf /var/cache/dnf
