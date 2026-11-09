@@ -1,0 +1,669 @@
+openapi: 3.1.0
+info:
+  title: Driftwatch API
+  version: 0.1.0
+  summary: Fleet compliance scanning, scoring and drift detection.
+  description: |
+    Agents enroll with a shared enrollment token, then submit scan reports with their
+    per-host agent token. The API scores each scan, records drift against the host's
+    previous scan, and serves read models for the dashboard.
+
+    Domain rules (scoring, drift directions, idempotency, limits) are specified in
+    `docs/CONTRACTS.md`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://localhost:8480
+    description: Local (docker compose)
+# Read endpoints are public in phase 1 (documented tradeoff); agent endpoints override this.
+security: []
+tags:
+  - name: agents
+    description: Endpoints called by the host agent.
+  - name: fleet
+    description: Fleet-wide read models for the dashboard.
+  - name: hosts
+    description: Enrolled hosts and their history.
+  - name: scans
+    description: Individual scan reports.
+  - name: checks
+    description: The check catalog and per-check fleet status.
+  - name: events
+    description: Drift events detected on ingest.
+
+paths:
+  /api/v1/agents/enroll:
+    post:
+      tags: [agents]
+      operationId: enrollAgent
+      summary: Enroll (or re-enroll) a host and obtain an agent token.
+      description: |
+        Upserts the host by `machineId`. Re-enrolling an existing host rotates its token:
+        the previous token stops working immediately.
+      security:
+        - enrollmentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollRequest' }
+      responses:
+        '201':
+          description: New host enrolled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollResponse' }
+        '200':
+          description: Existing host re-enrolled; token rotated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/scans:
+    post:
+      tags: [agents, scans]
+      operationId: submitScan
+      summary: Submit a scan report for the authenticated host.
+      description: |
+        Idempotent on `scanId`: resubmitting the same `scanId` for the same host returns
+        `200` with the stored summary. The same `scanId` from another host is `409`.
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScanReport' }
+      responses:
+        '201':
+          description: Scan stored, scored, and drift computed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanSummary' }
+        '200':
+          description: Duplicate submission; the stored summary is returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+
+  /api/v1/fleet/summary:
+    get:
+      tags: [fleet]
+      operationId: getFleetSummary
+      summary: Headline numbers for the fleet overview.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetSummary' }
+
+  /api/v1/fleet/trend:
+    get:
+      tags: [fleet]
+      operationId: getFleetTrend
+      summary: Fleet average score over time.
+      description: |
+        For each bucket, takes each host's most recent scan finished before the bucket
+        end (carry-forward) and averages their scores. Hosts with no scan by the bucket
+        end, or whose carried-forward scan has a null score, are excluded from that
+        bucket. Buckets are aligned to the Unix epoch; the last bucket is the one
+        containing the current time, and there are `ceil(hours × 60 / bucketMinutes)`
+        buckets.
+      parameters:
+        - name: hours
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 720, default: 24 }
+        - name: bucketMinutes
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1440, default: 60 }
+      responses:
+        '200':
+          description: OK. At most 500 points; requests that would exceed it are 400.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetTrend' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/hosts:
+    get:
+      tags: [hosts]
+      operationId: listHosts
+      summary: List hosts with their latest scan.
+      parameters:
+        - name: query
+          in: query
+          description: Case-insensitive substring match on hostname.
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/HostStatus' }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [hostname, score, lastSeenAt]
+            default: hostname
+        - name: direction
+          in: query
+          schema: { type: string, enum: [asc, desc], default: asc }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK. Hosts without a score (no scan, or a latest scan with a null score) sort last when sorting by score.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/hosts/{hostId}:
+    get:
+      tags: [hosts]
+      operationId: getHost
+      summary: One host with its latest scan.
+      parameters:
+        - $ref: '#/components/parameters/HostId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Host' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/hosts/{hostId}/scans:
+    get:
+      tags: [hosts, scans]
+      operationId: listHostScans
+      summary: Scan history for a host, newest first.
+      parameters:
+        - $ref: '#/components/parameters/HostId'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScanSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/hosts/{hostId}/drift:
+    get:
+      tags: [hosts]
+      operationId: getHostDrift
+      summary: Compare two scans of a host.
+      description: |
+        Defaults: `to` = latest scan, `from` = the scan immediately before `to`.
+        Both scans must belong to the host. Uses the same direction rules as drift
+        events. When the host has fewer than two scans, returns `200` with
+        `fromScan: null` and an empty `changes` array.
+      parameters:
+        - $ref: '#/components/parameters/HostId'
+        - name: from
+          in: query
+          schema: { type: string, format: uuid }
+        - name: to
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriftReport' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/scans/{scanId}:
+    get:
+      tags: [scans]
+      operationId: getScan
+      summary: A scan with all of its check results.
+      parameters:
+        - name: scanId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/checks:
+    get:
+      tags: [checks]
+      operationId: listChecks
+      summary: Check catalog with status counts across each host's latest scan.
+      responses:
+        '200':
+          description: OK. Sorted by failing hosts desc, then severity weight desc, then id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CheckSummary' }
+
+  /api/v1/checks/{checkId}:
+    get:
+      tags: [checks]
+      operationId: getCheck
+      summary: One check and its status on every host's latest scan.
+      parameters:
+        - name: checkId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9_.]{3,64}$' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: listDriftEvents
+      summary: Recent drift events across the fleet, newest first.
+      parameters:
+        - name: hostId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: direction
+          in: query
+          schema: { $ref: '#/components/schemas/DriftDirection' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DriftEvent' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+components:
+  securitySchemes:
+    enrollmentToken:
+      type: http
+      scheme: bearer
+      description: Shared enrollment secret (`DRIFTWATCH_ENROLLMENT_TOKEN`).
+    agentToken:
+      type: http
+      scheme: bearer
+      description: Per-host token returned by enrollment, prefixed `dwa_`.
+
+  parameters:
+    HostId:
+      name: hostId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Validation failed.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: The scanId already belongs to another host.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body exceeds 1 MiB.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference, example: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string, example: 'results[3].checkId' }
+              message: { type: string }
+
+    Severity:
+      type: string
+      enum: [low, medium, high, critical]
+
+    Category:
+      type: string
+      enum: [ssh, accounts, network, kernel, filesystem]
+
+    CheckStatus:
+      type: string
+      enum: [PASS, FAIL, ERROR, NOT_APPLICABLE]
+
+    HostStatus:
+      type: string
+      enum: [ONLINE, STALE]
+      description: STALE when lastSeenAt is older than DRIFTWATCH_STALE_AFTER.
+
+    DriftDirection:
+      type: string
+      enum: [REGRESSED, RESOLVED, CHANGED]
+
+    OsInfo:
+      type: object
+      required: [id, prettyName]
+      properties:
+        id: { type: string, maxLength: 64, example: ubuntu, description: '`ID` from /etc/os-release' }
+        version: { type: [string, 'null'], maxLength: 64, example: '24.04', description: '`VERSION_ID` from /etc/os-release' }
+        prettyName: { type: string, maxLength: 255, example: Ubuntu 24.04.3 LTS }
+
+    HostFacts:
+      type: object
+      required: [hostname, os, kernel, arch]
+      properties:
+        hostname: { type: string, minLength: 1, maxLength: 255 }
+        os: { $ref: '#/components/schemas/OsInfo' }
+        kernel: { type: string, maxLength: 128, example: 6.6.87.2-microsoft-standard-WSL2 }
+        arch: { type: string, maxLength: 32, example: amd64, description: Go GOARCH value }
+
+    EnrollRequest:
+      allOf:
+        - $ref: '#/components/schemas/HostFacts'
+        - type: object
+          required: [machineId, agentVersion]
+          properties:
+            machineId: { type: string, minLength: 8, maxLength: 64 }
+            agentVersion: { type: string, maxLength: 32, example: 0.1.0 }
+
+    EnrollResponse:
+      type: object
+      required: [hostId, agentToken]
+      properties:
+        hostId: { type: string, format: uuid }
+        agentToken: { type: string, example: dwa_3q2-9xYk... }
+
+    CheckResult:
+      type: object
+      required: [checkId, title, category, severity, status]
+      properties:
+        checkId: { type: string, pattern: '^[a-z0-9_.]{3,64}$', example: ssh.permit_root_login }
+        title: { type: string, maxLength: 200 }
+        category: { $ref: '#/components/schemas/Category' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        status: { $ref: '#/components/schemas/CheckStatus' }
+        expected: { type: [string, 'null'], maxLength: 200, example: 'no' }
+        actual: { type: [string, 'null'], maxLength: 200, example: 'yes' }
+        evidence:
+          type: [string, 'null']
+          maxLength: 1000
+          example: '/etc/ssh/sshd_config:32: PermitRootLogin yes'
+
+    ScanReport:
+      type: object
+      required: [scanId, agentVersion, startedAt, finishedAt, host, results]
+      properties:
+        scanId: { type: string, format: uuid }
+        agentVersion: { type: string, maxLength: 32 }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        host:
+          $ref: '#/components/schemas/HostFacts'
+          description: Current facts; the API updates the stored host with them.
+        results:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/CheckResult' }
+
+    StatusCounts:
+      type: object
+      required: [pass, fail, error, notApplicable]
+      properties:
+        pass: { type: integer, minimum: 0 }
+        fail: { type: integer, minimum: 0 }
+        error: { type: integer, minimum: 0 }
+        notApplicable: { type: integer, minimum: 0 }
+
+    ScanSummary:
+      type: object
+      required: [id, hostId, agentVersion, startedAt, finishedAt, receivedAt, score, counts]
+      properties:
+        id: { type: string, format: uuid }
+        hostId: { type: string, format: uuid }
+        agentVersion: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        score:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 100
+          description: One decimal place. Null when no check was applicable.
+        counts: { $ref: '#/components/schemas/StatusCounts' }
+
+    ScanDetail:
+      allOf:
+        - $ref: '#/components/schemas/ScanSummary'
+        - type: object
+          required: [hostname, results]
+          properties:
+            hostname: { type: string }
+            results:
+              type: array
+              description: Sorted alphabetically by category, then by checkId.
+              items: { $ref: '#/components/schemas/CheckResult' }
+
+    Host:
+      type: object
+      required: [id, hostname, os, kernel, arch, agentVersion, enrolledAt, lastSeenAt, status, latestScan]
+      properties:
+        id: { type: string, format: uuid }
+        hostname: { type: string }
+        os: { $ref: '#/components/schemas/OsInfo' }
+        kernel: { type: string }
+        arch: { type: string }
+        agentVersion: { type: string }
+        enrolledAt: { type: string, format: date-time }
+        lastSeenAt:
+          type: string
+          format: date-time
+          description: Last successful enroll or scan submission.
+        status: { $ref: '#/components/schemas/HostStatus' }
+        latestScan:
+          oneOf:
+            - $ref: '#/components/schemas/ScanSummary'
+            - type: 'null'
+
+    HostPage:
+      type: object
+      required: [items, page, size, totalItems]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Host' }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer }
+
+    CheckFailure:
+      type: object
+      required: [checkId, title, category, severity, failingHosts]
+      properties:
+        checkId: { type: string }
+        title: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        failingHosts:
+          type: integer
+          description: Hosts whose latest scan has this check as FAIL or ERROR.
+
+    FleetSummary:
+      type: object
+      required: [hostCount, onlineCount, staleCount, averageScore, hostsWithCriticalFailures, topFailingChecks, lastScanAt]
+      properties:
+        hostCount: { type: integer }
+        onlineCount: { type: integer }
+        staleCount: { type: integer }
+        averageScore:
+          type: [number, 'null']
+          description: |
+            Mean score of each host's latest scan, one decimal. Hosts with no scan, or
+            whose latest scan has a null score, are excluded. Null when no host qualifies.
+        hostsWithCriticalFailures:
+          type: integer
+          description: Hosts whose latest scan fails (FAIL or ERROR) at least one critical check.
+        topFailingChecks:
+          type: array
+          maxItems: 5
+          description: Checks with failingHosts > 0, ordered by failingHosts desc, severity weight desc, checkId.
+          items: { $ref: '#/components/schemas/CheckFailure' }
+        lastScanAt:
+          type: [string, 'null']
+          format: date-time
+
+    FleetTrendPoint:
+      type: object
+      required: [bucketStart, averageScore, hostCount]
+      properties:
+        bucketStart: { type: string, format: date-time }
+        averageScore: { type: [number, 'null'] }
+        hostCount: { type: integer, description: Hosts whose carried-forward scan for this bucket has a score. }
+
+    FleetTrend:
+      type: object
+      required: [bucketMinutes, points]
+      properties:
+        bucketMinutes: { type: integer }
+        points:
+          type: array
+          description: Oldest first, one entry per bucket including empty ones.
+          items: { $ref: '#/components/schemas/FleetTrendPoint' }
+
+    CheckSummary:
+      type: object
+      required: [id, title, category, severity, counts]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        counts:
+          $ref: '#/components/schemas/StatusCounts'
+          description: Status of this check across each host's latest scan.
+
+    CheckHostStatus:
+      type: object
+      required: [hostId, hostname, status, scanId, finishedAt]
+      properties:
+        hostId: { type: string, format: uuid }
+        hostname: { type: string }
+        status: { $ref: '#/components/schemas/CheckStatus' }
+        expected: { type: [string, 'null'] }
+        actual: { type: [string, 'null'] }
+        evidence: { type: [string, 'null'] }
+        scanId: { type: string, format: uuid }
+        finishedAt: { type: string, format: date-time }
+
+    CheckDetail:
+      allOf:
+        - $ref: '#/components/schemas/CheckSummary'
+        - type: object
+          required: [hosts]
+          properties:
+            hosts:
+              type: array
+              description: FAIL and ERROR first, then by hostname.
+              items: { $ref: '#/components/schemas/CheckHostStatus' }
+
+    DriftChange:
+      type: object
+      required: [checkId, title, category, severity, fromStatus, toStatus, direction]
+      properties:
+        checkId: { type: string }
+        title: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        fromStatus: { $ref: '#/components/schemas/CheckStatus' }
+        toStatus: { $ref: '#/components/schemas/CheckStatus' }
+        fromEvidence: { type: [string, 'null'] }
+        toEvidence: { type: [string, 'null'] }
+        direction: { $ref: '#/components/schemas/DriftDirection' }
+
+    DriftReport:
+      type: object
+      required: [hostId, fromScan, toScan, changes]
+      properties:
+        hostId: { type: string, format: uuid }
+        fromScan:
+          oneOf:
+            - $ref: '#/components/schemas/ScanSummary'
+            - type: 'null'
+        toScan:
+          oneOf:
+            - $ref: '#/components/schemas/ScanSummary'
+            - type: 'null'
+        changes:
+          type: array
+          description: REGRESSED first, then RESOLVED, then CHANGED; then severity weight desc, checkId.
+          items: { $ref: '#/components/schemas/DriftChange' }
+
+    DriftEvent:
+      allOf:
+        - $ref: '#/components/schemas/DriftChange'
+        - type: object
+          required: [id, hostId, hostname, scanId, detectedAt]
+          properties:
+            id: { type: string, format: uuid }
+            hostId: { type: string, format: uuid }
+            hostname: { type: string }
+            scanId:
+              type: string
+              format: uuid
+              description: The scan in which the change was observed.
+            detectedAt:
+              type: string
+              format: date-time
+              description: finishedAt of that scan.
