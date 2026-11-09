@@ -1,5 +1,8 @@
 # Driftwatch
 
+[![CI](https://github.com/TahaUsama210/driftwatch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TahaUsama210/driftwatch/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Continuous CIS-style compliance scanning for a Linux fleet, with drift detection.**
 
 A small Go agent on each host checks SSH, account, kernel and network hardening. It
