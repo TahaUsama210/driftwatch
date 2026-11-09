@@ -1,5 +1,6 @@
 # Weekly dependency updates. Minor and patch bumps are grouped into one PR per
-# ecosystem; major bumps arrive as individual PRs because they need review.
+# ecosystem; major bumps arrive as individual PRs because they need review, except
+# where an ignore rule below pins a major line on purpose.
 # The cooldown matches the project rule of only adopting releases that are at least
 # two weeks old.
 
@@ -35,6 +36,16 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Types must match the Node runtime pinned in web/.nvmrc (22.x LTS).
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
+      # typescript-eslint and openapi-typescript don't support TypeScript 7 yet.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+      # MSW 3 changes the handler API used across the mocks; migrate deliberately.
+      - dependency-name: msw
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
@@ -59,6 +70,21 @@ updates:
     groups:
       docker-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Runtimes stay on LTS lines: Java 25 and Node 22. Moving to the next LTS is a
+      # deliberate change, not a routine bump.
+      - dependency-name: eclipse-temurin
+        update-types: [version-update:semver-major]
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+      # The demo hosts model specific distro releases (debian-legacy is old on
+      # purpose, ubuntu-hardened tracks LTS only), so their major versions are fixed.
+      - dependency-name: ubuntu
+        update-types: [version-update:semver-major]
+      - dependency-name: debian
+        update-types: [version-update:semver-major]
+      - dependency-name: rockylinux/rockylinux
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: docker-compose
     directory: /
@@ -69,3 +95,7 @@ updates:
     groups:
       compose-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # A Postgres major upgrade needs a data migration (pg_upgrade), not a tag bump.
+      - dependency-name: postgres
+        update-types: [version-update:semver-major]
