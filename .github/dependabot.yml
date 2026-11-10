@@ -27,8 +27,9 @@ updates:
       maven-minor-and-patch:
         update-types: [minor, patch]
 
+  # The browser tests share the dashboard's Node and TypeScript versions.
   - package-ecosystem: npm
-    directory: /web
+    directories: [/web, /e2e]
     schedule:
       interval: weekly
     cooldown:
@@ -87,7 +88,9 @@ updates:
         update-types: [version-update:semver-major]
 
   - package-ecosystem: docker-compose
-    directory: /
+    directories:
+      - /
+      - /deploy/observability
     schedule:
       interval: weekly
     cooldown:
@@ -99,3 +102,25 @@ updates:
       # A Postgres major upgrade needs a data migration (pg_upgrade), not a tag bump.
       - dependency-name: postgres
         update-types: [version-update:semver-major]
+
+  # Provider versions in the committed lock files. Each module locks its own providers.
+  - package-ecosystem: terraform
+    directories:
+      - /infra/terraform/modules/*
+      - /infra/terraform/envs/*
+      - /infra/terraform/bootstrap
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      terraform-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: helm
+    directories:
+      - /deploy/helm/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14

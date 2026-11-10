@@ -1,18 +1,35 @@
-# Driftwatch local stack: Postgres, the API, the dashboard, and a four-host demo fleet.
+# Driftwatch local stack: Postgres, Keycloak, the API, the dashboard, and a four-host
+# demo fleet, plus an optional Prometheus/Alertmanager/Grafana stack.
 #
 #   docker compose up -d --build --wait    # zero setup; dashboard at http://localhost:8400
 #   bash scripts/smoke.sh                  # end-to-end check against the running stack
-#   docker compose down -v                 # stop and delete all data
+#   docker compose --profile observability up -d --build --wait   # adds alerting
+#   docker compose --profile observability down -v                 # stop and delete all data
 #
 # Every published port is bound to 127.0.0.1 only. Copy .env.example to .env to
 # override any default below.
+#
+# Demo sign-in (Keycloak realm imported from the Helm chart): viewer / viewer-demo and
+# admin / admin-demo. Keycloak runs in dev mode with an embedded H2 database and demo
+# credentials: it is for local use only, never for anything other people can reach.
 
 name: driftwatch
+
+# Prometheus, Alertmanager, a webhook receiver and Grafana, owned by the observability
+# team. Every service there is in the `observability` profile, so a plain
+# `docker compose up` does not start them.
+include:
+  - path: deploy/observability/compose.yml
 
 # Local demo default only. It lets `docker compose up` work with no setup, and it is
 # public, so anything reachable by other people must set DRIFTWATCH_ENROLLMENT_TOKEN
 # (24+ characters) in .env or the environment.
 x-enrollment-token: &enrollment-token ${DRIFTWATCH_ENROLLMENT_TOKEN:-insecure-local-demo-token-change-me}
+
+# The dashboard, Keycloak and the API share one public origin: nginx serves the SPA and
+# proxies /api and /auth. Keycloak stamps this issuer into every token however it was
+# reached, so the API accepts exactly this value and fetches signing keys internally.
+x-oidc-issuer: &oidc-issuer http://localhost:8400/auth/realms/driftwatch
 
 x-logging: &logging
   driver: json-file
@@ -74,6 +91,47 @@ services:
       - "127.0.0.1:35432:5432"
     logging: *logging
 
+  # Identity provider for the dashboard. Reached only through the web container at
+  # http://localhost:8400/auth, so it publishes no port of its own.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_HTTP_RELATIVE_PATH: /auth
+      # Fixes the public URL (and so the token issuer) regardless of the Host header.
+      KC_HOSTNAME: http://localhost:8400/auth
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      # The single realm definition, shared with the Helm chart. Imported on first start;
+      # an existing realm is left untouched, so `down -v` resets it.
+      - ./deploy/helm/driftwatch/files/keycloak/driftwatch-realm.json:/opt/keycloak/data/import/driftwatch-realm.json:ro
+    healthcheck:
+      # The image has no curl or wget, so speak HTTP over bash's /dev/tcp to the
+      # management port and require a 200 status line from the readiness endpoint.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /auth/health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          read -r status <&3 && [[ $$status == *' 200 '* ]]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+      start_interval: 2s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *logging
+
+  # The API does not depend on Keycloak: it fetches signing keys lazily, so it starts
+  # and reports ready while Keycloak is still booting or down.
   api:
     build: ./api
     restart: unless-stopped
@@ -83,6 +141,8 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-driftwatch}
       DRIFTWATCH_ENROLLMENT_TOKEN: *enrollment-token
       DRIFTWATCH_STALE_AFTER: ${DRIFTWATCH_STALE_AFTER:-PT5M}
+      DRIFTWATCH_OIDC_ISSUER: *oidc-issuer
+      DRIFTWATCH_OIDC_JWKS_URI: http://keycloak:8080/auth/realms/driftwatch/protocol/openid-connect/certs
     depends_on:
       db:
         condition: service_healthy
@@ -106,8 +166,14 @@ services:
     restart: unless-stopped
     environment:
       API_UPSTREAM: http://api:8080
+      KEYCLOAK_UPSTREAM: http://keycloak:8080
+      # Served to the SPA as /config.json at container start.
+      OIDC_AUTHORITY: *oidc-issuer
+      OIDC_CLIENT_ID: driftwatch-web
     depends_on:
       api:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     ports:
       - "127.0.0.1:8400:8080"

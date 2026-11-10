@@ -3,21 +3,27 @@
 # Build context: agent/
 #
 #   docker build -t driftwatch-agent:dev --build-arg VERSION=0.1.0 --build-arg COMMIT=$(git rev-parse --short HEAD) agent
+#   docker buildx build --platform linux/amd64,linux/arm64 -t driftwatch-agent:dev agent
 #
 # The image scans the host it runs on when the host's root is mounted into it:
 #
 #   docker run --rm -v /:/host:ro -e DRIFTWATCH_ROOT=/host -e DRIFTWATCH_PROC=/host/proc \
 #     driftwatch-agent:dev scan
 
-FROM golang:1.27-alpine3.24 AS build
+# The build stage runs on the builder's native platform and cross-compiles: the agent is
+# pure Go with CGO disabled, so a multi-arch build needs no emulation for this stage.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine3.24 AS build
 WORKDIR /src
 COPY go.mod ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/driftwatch-agent ./cmd/driftwatch-agent
 
