@@ -1,0 +1,59 @@
+#!/bin/sh
+# Installs driftwatch-agent ${agent_version}. Rendered by Terraform (modules/fleet) and run
+# once by cloud-init. It FAILS CLOSED: if checksums.txt is missing, has no unique entry for
+# the archive, or the archive's sha256 differs, nothing is installed and the script exits
+# non-zero (visible in /var/log/cloud-init-output.log and cloud-init status).
+set -eu
+umask 022
+
+log() { echo "driftwatch-install-agent: $*" >&2; }
+fail() { log "FATAL: $*"; exit 1; }
+
+version='${agent_version}'
+base='${release_base_url}/v${agent_version}'
+pinned_checksums_sha256='${checksums_sha256}'
+
+case "$(uname -m)" in
+  x86_64) arch=amd64 ;;
+  aarch64) arch=arm64 ;;
+  *) fail "unsupported machine type $(uname -m)" ;;
+esac
+archive="driftwatch-agent_$${version}_linux_$${arch}.tar.gz"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+fetch() {
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors -o "$2" "$1" \
+    || fail "download failed: $1"
+}
+
+log "downloading checksums.txt and $archive from $base"
+fetch "$base/checksums.txt" "$work/checksums.txt"
+
+if [ -n "$pinned_checksums_sha256" ]; then
+  echo "$pinned_checksums_sha256  $work/checksums.txt" | sha256sum -c --strict --quiet - \
+    || fail "checksums.txt does not match the sha256 pinned in Terraform"
+fi
+
+# Exactly one "<sha256>  <file>" line must name the archive.
+expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$work/checksums.txt")
+[ "$(printf '%s\n' "$expected" | grep -c .)" -eq 1 ] || fail "checksums.txt has no unique entry for $archive"
+printf '%s\n' "$expected" | grep -Eqx '[0-9a-f]{64}' || fail "malformed checksum for $archive"
+
+fetch "$base/$archive" "$work/$archive"
+(cd "$work" && printf '%s  %s\n' "$expected" "$archive" | sha256sum -c --strict -) \
+  || fail "sha256 mismatch for $archive; refusing to install"
+log "verified sha256 $expected"
+
+mkdir "$work/extract"
+tar -xzf "$work/$archive" -C "$work/extract" --no-same-owner --no-same-permissions
+binary=$(find "$work/extract" -type f -name driftwatch-agent)
+[ "$(printf '%s\n' "$binary" | grep -c .)" -eq 1 ] || fail "archive must contain exactly one driftwatch-agent binary"
+
+install -o root -g root -m 0755 "$binary" /usr/local/bin/driftwatch-agent
+/usr/local/bin/driftwatch-agent version
+
+systemctl daemon-reload
+systemctl enable --now driftwatch-agent.service
+log "driftwatch-agent $version installed and started"

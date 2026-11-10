@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Print one SSM parameter's decrypted value using the instance role.
+
+Rendered by Terraform (modules/ssm-instance-role). Standard library only, so it runs on
+every supported AMI without installing the AWS CLI. Credentials come from IMDSv2 and
+stay inside this process: they never appear on a command line or in a file.
+"""
+import datetime
+import hashlib
+import hmac
+import json
+import sys
+import urllib.request
+
+REGION = "${region}"
+PARAMETER_NAME = "${parameter_name}"
+IMDS = "http://169.254.169.254/latest"
+
+
+def imds_get(path, token):
+    req = urllib.request.Request(IMDS + path, headers={"X-aws-ec2-metadata-token": token})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return resp.read().decode()
+
+
+def credentials():
+    req = urllib.request.Request(
+        IMDS + "/api/token", method="PUT",
+        headers={"X-aws-ec2-metadata-token-ttl-seconds": "300"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        token = resp.read().decode()
+    role = imds_get("/meta-data/iam/security-credentials/", token).splitlines()[0]
+    return json.loads(imds_get("/meta-data/iam/security-credentials/" + role, token))
+
+
+def hmac_sha256(key, msg):
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+def get_parameter():
+    """Call ssm:GetParameter with a SigV4-signed request."""
+    creds = credentials()
+    host = "ssm." + REGION + ".amazonaws.com"
+    body = json.dumps({"Name": PARAMETER_NAME, "WithDecryption": True}).encode()
+    amz_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    day = amz_date[:8]
+    headers = {
+        "content-type": "application/x-amz-json-1.1",
+        "host": host,
+        "x-amz-date": amz_date,
+        "x-amz-security-token": creds["Token"],
+        "x-amz-target": "AmazonSSM.GetParameter",
+    }
+    names = sorted(headers)
+    signed_headers = ";".join(names)
+    canonical_request = "\n".join([
+        "POST", "/", "",
+        "".join(name + ":" + headers[name] + "\n" for name in names),
+        signed_headers,
+        hashlib.sha256(body).hexdigest(),
+    ])
+    scope = day + "/" + REGION + "/ssm/aws4_request"
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256", amz_date, scope,
+        hashlib.sha256(canonical_request.encode()).hexdigest(),
+    ])
+    key = ("AWS4" + creds["SecretAccessKey"]).encode()
+    for part in (day, REGION, "ssm", "aws4_request"):
+        key = hmac_sha256(key, part)
+    signature = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    headers["authorization"] = (
+        "AWS4-HMAC-SHA256 Credential=" + creds["AccessKeyId"] + "/" + scope
+        + ", SignedHeaders=" + signed_headers + ", Signature=" + signature)
+    req = urllib.request.Request("https://" + host + "/", data=body, method="POST", headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)["Parameter"]["Value"]
+
+
+if __name__ == "__main__":
+    try:
+        sys.stdout.write(get_parameter())
+    except Exception as exc:  # report the failure without echoing secret material
+        sys.stderr.write("get-parameter: " + type(exc).__name__ + ": " + str(exc) + "\n")
+        sys.exit(1)

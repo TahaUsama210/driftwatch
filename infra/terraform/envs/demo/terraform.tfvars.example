@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (git-ignored) and adjust.
+region = "eu-west-1"
+
+# Released versions to deploy (the v<version> GitHub release and the chart in GHCR).
+agent_version = "0.2.0"
+chart_version = "0.2.0"
+
+# Your public IPv4 address, to open the dashboard. Leave empty to keep it closed.
+# admin_cidrs = ["203.0.113.7/32"]
+
+fleet_instance_count = 3

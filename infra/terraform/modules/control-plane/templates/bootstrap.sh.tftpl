@@ -1,0 +1,55 @@
+#!/bin/sh
+# Driftwatch control-plane bootstrap, rendered by Terraform (modules/control-plane) and run
+# once by cloud-init. Any failure stops the script (set -eu) before the chart is installed;
+# the output is in /var/log/cloud-init-output.log.
+set -eu
+umask 077
+
+log() { echo "driftwatch-bootstrap: $*" >&2; }
+fail() { log "FATAL: $*"; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+systemctl try-restart systemd-timesyncd.service 2>/dev/null || true
+
+log "downloading the k3s ${k3s_version} install script"
+curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+  -o "$work/install.sh" '${k3s_install_script_url}'
+echo '${k3s_install_script_sha256}  '"$work/install.sh" | sha256sum -c --strict - \
+  || fail "k3s install script does not match the pinned sha256; refusing to run it"
+
+# install.sh downloads the pinned k3s binary and verifies it against the release's
+# sha256sum file before installing it.
+log "installing k3s ${k3s_version}"
+INSTALL_K3S_VERSION='${k3s_version}' INSTALL_K3S_EXEC='server' sh "$work/install.sh"
+
+kubectl() { /usr/local/bin/k3s kubectl "$@"; }
+
+log "waiting for the node to become Ready"
+tries=0
+until kubectl wait --for=condition=Ready node --all --timeout=10s >/dev/null 2>&1; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 60 ] || fail "the k3s node did not become Ready"
+  sleep 5
+done
+
+log "creating namespace ${namespace} (Pod Security: restricted)"
+kubectl apply -f /etc/driftwatch/namespace.yaml
+
+log "creating Secret ${secret_name} from the SSM enrollment-token parameter"
+token=$(/usr/local/libexec/driftwatch/get-enrollment-token) || fail "could not read the enrollment token from SSM"
+[ -n "$token" ] || fail "the enrollment token parameter is empty"
+# The token goes through a pipe, never a command-line argument or a file.
+printf '%s' "$token" \
+  | kubectl -n '${namespace}' create secret generic '${secret_name}' \
+      --from-file='${secret_key}=/dev/stdin' --dry-run=client -o yaml \
+  | kubectl apply -f - >/dev/null
+unset token
+
+# The Helm controller installs the chart as soon as this file appears; it is copied last so
+# the release never starts without its Secret.
+log "installing ${chart_ref} ${chart_version}"
+install -m 0600 /etc/driftwatch/helmchart.yaml /var/lib/rancher/k3s/server/manifests/driftwatch.yaml
+
+log "done"

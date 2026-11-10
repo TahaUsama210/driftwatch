@@ -1,0 +1,9 @@
+# Copy to backend.hcl (git-ignored) and fill in the values printed by ../../bootstrap:
+#   terraform -chdir=../../bootstrap output -raw backend_config > backend.hcl
+#   terraform init -backend-config=backend.hcl
+bucket       = "driftwatch-tfstate-123456789012-eu-west-1"
+key          = "envs/demo/terraform.tfstate"
+region       = "eu-west-1"
+encrypt      = true
+kms_key_id   = "arn:aws:kms:eu-west-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+use_lockfile = true
