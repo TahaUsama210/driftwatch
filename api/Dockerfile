@@ -2,7 +2,10 @@
 # Build context: api/
 
 # ---- Build: compile with the Maven Wrapper and split the Boot jar into layers ----
-FROM eclipse-temurin:25.0.4_7-jdk-alpine AS build
+# Runs on the build machine's own platform even for a multi-arch build: the jar is bytecode, the
+# same for every target, so Maven never runs under QEMU emulation. Only the runtime stage below is
+# per target platform.
+FROM --platform=$BUILDPLATFORM eclipse-temurin:25.0.4_7-jdk-alpine AS build
 WORKDIR /workspace
 
 COPY --chmod=0755 mvnw ./
@@ -19,9 +22,12 @@ RUN --mount=type=cache,target=/root/.m2 \
 # ---- Runtime: JRE only, unprivileged ----
 FROM eclipse-temurin:25.0.4_7-jre-alpine
 
-# A fixed, non-root UID/GID; the process needs no Linux capabilities (it binds 8080, above 1024),
-# so it runs unchanged with cap_drop: [ALL] and no-new-privileges.
-RUN addgroup -S -g 10001 driftwatch \
+# Apply Alpine security fixes published after the base image was built: CI's image scan fails on
+# any fixable HIGH or CRITICAL CVE. Then a fixed, non-root UID/GID; the process needs no Linux
+# capabilities (it binds 8080, above 1024), so it runs unchanged with cap_drop: [ALL] and
+# no-new-privileges.
+RUN apk upgrade --no-cache \
+ && addgroup -S -g 10001 driftwatch \
  && adduser -S -D -H -u 10001 -G driftwatch -s /sbin/nologin driftwatch
 
 WORKDIR /app

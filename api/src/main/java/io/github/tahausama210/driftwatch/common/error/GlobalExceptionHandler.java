@@ -21,6 +21,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.AuthenticationServiceException;
+import org.springframework.security.authentication.InsufficientAuthenticationException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.web.firewall.RequestRejectedException;
 import org.springframework.validation.FieldError;
@@ -133,17 +134,33 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return problem(ex, HttpStatus.CONTENT_TOO_LARGE, ex.getMessage(), new HttpHeaders(), request);
     }
 
-    /** The credential store could not be queried; this is a server fault, not a bad credential. */
+    /**
+     * What a credential is checked against (the agent-token store, or the identity provider's
+     * signing keys) is unreachable. The credential may well be valid, so this is a retryable 503,
+     * not a 401 that would send the client to re-authenticate.
+     */
     @ExceptionHandler(AuthenticationServiceException.class)
     ResponseEntity<Object> handleAuthenticationServiceFailure(AuthenticationServiceException ex, WebRequest request) {
         log.error("Authentication could not be performed", ex);
-        return internalError(ex, request);
+        return problem(
+                ex,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "Credentials cannot be verified right now; retry later.",
+                new HttpHeaders(),
+                request);
     }
 
+    /**
+     * RFC 6750 section 3: a request without credentials gets the bare {@code Bearer} challenge; one
+     * whose credentials were rejected also gets {@code error="invalid_token"}, which tells a client
+     * that obtaining a new token, not retrying, is the fix.
+     */
     @ExceptionHandler(AuthenticationException.class)
     ResponseEntity<Object> handleAuthenticationFailure(AuthenticationException ex, WebRequest request) {
         HttpHeaders headers = new HttpHeaders();
-        headers.set(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
+        headers.set(
+                HttpHeaders.WWW_AUTHENTICATE,
+                ex instanceof InsufficientAuthenticationException ? "Bearer" : "Bearer error=\"invalid_token\"");
         return problem(ex, HttpStatus.UNAUTHORIZED, "A valid bearer token is required.", headers, request);
     }
 

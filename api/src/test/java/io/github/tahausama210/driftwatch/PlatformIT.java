@@ -43,10 +43,9 @@ class PlatformIT extends IntegrationTest {
                 "/actuator/health/readiness",
                 "/actuator/prometheus",
                 "/v3/api-docs",
-                "/swagger-ui/index.html",
-                "/api/v1/fleet/summary"
+                "/swagger-ui/index.html"
             })
-    void operationalAndReadEndpointsArePublic(String path) throws Exception {
+    void operationalEndpointsArePublic(String path) throws Exception {
         mvc.perform(get(path)).andExpect(status().isOk());
     }
 
@@ -79,12 +78,19 @@ class PlatformIT extends IntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/hosts")
+                        .with(asAdmin())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON));
         mvc.perform(delete("/api/v1/hosts/{id}", UUID.randomUUID())).andExpect(status().isUnauthorized());
     }
 
     @Test
-    void unknownApiPathsAreNotFoundProblems() throws Exception {
-        mvc.perform(get("/api/v1/does-not-exist"))
+    void unknownApiPathsNeedATokenAndAreThenNotFoundProblems() throws Exception {
+        mvc.perform(get("/api/v1/does-not-exist")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/v1/does-not-exist").with(asViewer()))
                 .andExpect(status().isNotFound())
                 .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.type").value("about:blank"))
@@ -115,20 +121,28 @@ class PlatformIT extends IntegrationTest {
 
     @Test
     void aSafeCallerRequestIdIsEchoedAndAnUnsafeOneReplaced() throws Exception {
-        mvc.perform(get("/api/v1/fleet/summary").header(RequestIdFilter.HEADER, "trace-abc.123"))
+        mvc.perform(get("/api/v1/fleet/summary").with(asViewer()).header(RequestIdFilter.HEADER, "trace-abc.123"))
                 .andExpect(header().string(RequestIdFilter.HEADER, "trace-abc.123"));
-        mvc.perform(get("/api/v1/fleet/summary").header(RequestIdFilter.HEADER, "bad id\nInjected: yes"))
+        mvc.perform(get("/api/v1/fleet/summary")
+                        .with(asViewer())
+                        .header(RequestIdFilter.HEADER, "bad id\nInjected: yes"))
                 .andExpect(header().string(RequestIdFilter.HEADER, matchesPattern("[0-9a-f-]{36}")));
     }
 
     @Test
-    void theDashboardOriginMayReadCrossOrigin() throws Exception {
+    void theDashboardOriginMayCallWithItsBearerTokenCrossOrigin() throws Exception {
         mvc.perform(options("/api/v1/hosts")
                         .header(HttpHeaders.ORIGIN, DASHBOARD_ORIGIN)
-                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "GET"))
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_HEADERS, "authorization"))
                 .andExpect(status().isOk())
-                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, DASHBOARD_ORIGIN));
-        mvc.perform(get("/api/v1/hosts").header(HttpHeaders.ORIGIN, DASHBOARD_ORIGIN))
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, DASHBOARD_ORIGIN))
+                .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS, "authorization"));
+        mvc.perform(options("/api/v1/hosts/{id}", UUID.randomUUID())
+                        .header(HttpHeaders.ORIGIN, DASHBOARD_ORIGIN)
+                        .header(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD, "DELETE"))
+                .andExpect(status().isOk());
+        mvc.perform(get("/api/v1/hosts").with(asViewer()).header(HttpHeaders.ORIGIN, DASHBOARD_ORIGIN))
                 .andExpect(header().string(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, RequestIdFilter.HEADER));
     }
 

@@ -19,7 +19,14 @@ class DriftwatchPropertiesTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(PropertiesOnly.class)
-            .withPropertyValues("driftwatch.stale-after=PT5M", "driftwatch.metrics-refresh-interval=PT15S");
+            .withPropertyValues(
+                    "driftwatch.stale-after=PT5M",
+                    "driftwatch.metrics-refresh-interval=PT15S",
+                    "driftwatch.oidc.issuer=" + ISSUER,
+                    "driftwatch.oidc.audience=driftwatch-api");
+
+    private static final String ISSUER = "http://localhost:8400/auth/realms/driftwatch";
+    private static final String VALID_TOKEN = "exactly-twenty-four-char";
 
     @Test
     void startupFailsWithoutAnEnrollmentToken() {
@@ -55,10 +62,53 @@ class DriftwatchPropertiesTest {
                 });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", "localhost:8400/auth/realms/driftwatch"})
+    void startupFailsWithoutAnAbsoluteIssuer(String issuer) {
+        runner.withPropertyValues("driftwatch.enrollment-token=" + VALID_TOKEN, "driftwatch.oidc.issuer=" + issuer)
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        .hasMessageContaining("driftwatch.oidc.issuer"));
+    }
+
+    @Test
+    void theMissingIssuerErrorNamesTheEnvironmentVariable() {
+        runner.withPropertyValues("driftwatch.enrollment-token=" + VALID_TOKEN, "driftwatch.oidc.issuer=")
+                .run(context -> assertThat(context.getStartupFailure())
+                        .rootCause()
+                        .hasMessageContaining("DRIFTWATCH_OIDC_ISSUER"));
+    }
+
+    @Test
+    void theJwksUriDefaultsToKeycloaksEndpointUnderTheIssuer() {
+        runner.withPropertyValues("driftwatch.enrollment-token=" + VALID_TOKEN)
+                .run(context -> assertThat(context.getBean(DriftwatchProperties.class)
+                                .oidc()
+                                .jwksUri())
+                        .isEqualTo(ISSUER + "/protocol/openid-connect/certs"));
+    }
+
+    @Test
+    void anExplicitJwksUriWins() {
+        runner.withPropertyValues(
+                        "driftwatch.enrollment-token=" + VALID_TOKEN,
+                        "driftwatch.oidc.jwks-uri=http://keycloak:8080/auth/realms/driftwatch/protocol/openid-connect/certs")
+                .run(context -> assertThat(context.getBean(DriftwatchProperties.class)
+                                .oidc()
+                                .jwksUri())
+                        .isEqualTo("http://keycloak:8080/auth/realms/driftwatch/protocol/openid-connect/certs"));
+    }
+
     @Test
     void toStringRedactsTheEnrollmentToken() {
         DriftwatchProperties properties = new DriftwatchProperties(
-                "super-secret-enrollment-token", Duration.ofMinutes(5), List.of(), Duration.ofSeconds(15));
+                "super-secret-enrollment-token",
+                Duration.ofMinutes(5),
+                List.of(),
+                Duration.ofSeconds(15),
+                new DriftwatchProperties.Oidc(ISSUER, "", "driftwatch-api"));
 
         assertThat(properties.toString()).doesNotContain("super-secret").contains("<redacted>");
     }

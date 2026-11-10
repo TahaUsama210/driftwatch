@@ -21,6 +21,12 @@ driftwatch:
   stale-after: ${DRIFTWATCH_STALE_AFTER:PT5M}
   cors-origins: ${DRIFTWATCH_CORS_ORIGINS:}
   metrics-refresh-interval: PT15S
+  oidc:
+    # Required: the exact "iss" of accepted access tokens; startup fails without it.
+    issuer: ${DRIFTWATCH_OIDC_ISSUER:}
+    # Empty means Keycloak's endpoint under the issuer, <issuer>/protocol/openid-connect/certs.
+    jwks-uri: ${DRIFTWATCH_OIDC_JWKS_URI:}
+    audience: ${DRIFTWATCH_OIDC_AUDIENCE:driftwatch-api}
 
 management:
   endpoints:
