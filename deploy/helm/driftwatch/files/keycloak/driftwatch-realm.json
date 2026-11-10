@@ -1,0 +1,210 @@
+{
+  "realm": "driftwatch",
+  "displayName": "Driftwatch",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "failureFactor": 10,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "viewer",
+        "description": "Read fleet posture, hosts, checks and drift events."
+      },
+      {
+        "name": "admin",
+        "description": "Everything a viewer can do, plus decommission hosts.",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "viewer"
+          ]
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "driftwatch-web",
+      "name": "Driftwatch dashboard",
+      "description": "Browser SPA. Public client: Authorization Code with PKCE (S256) only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "http://localhost:8400/*",
+        "http://localhost:5180/*",
+        "http://localhost:38080/*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8400/*##http://localhost:5180/*##http://localhost:38080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "driftwatch-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "driftwatch-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "driftwatch-smoke-viewer",
+      "name": "Smoke test (viewer)",
+      "description": "Service account used by scripts/smoke.sh. Client credentials only. Demo secret: local use only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "smoke-viewer-demo-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "driftwatch-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "driftwatch-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "driftwatch-smoke-admin",
+      "name": "Smoke test (admin)",
+      "description": "Service account used by scripts/smoke.sh to exercise admin-only endpoints. Demo secret: local use only.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "smoke-admin-demo-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "driftwatch-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "driftwatch-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "fullScopeAllowed": false
+    }
+  ],
+  "scopeMappings": [
+    {
+      "client": "driftwatch-web",
+      "roles": [
+        "viewer",
+        "admin"
+      ]
+    },
+    {
+      "client": "driftwatch-smoke-viewer",
+      "roles": [
+        "viewer"
+      ]
+    },
+    {
+      "client": "driftwatch-smoke-admin",
+      "roles": [
+        "viewer",
+        "admin"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "viewer",
+      "enabled": true,
+      "email": "viewer@driftwatch.local",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Viewer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "viewer-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "viewer"
+      ]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@driftwatch.local",
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin"
+      ]
+    },
+    {
+      "username": "service-account-driftwatch-smoke-viewer",
+      "enabled": true,
+      "serviceAccountClientId": "driftwatch-smoke-viewer",
+      "realmRoles": [
+        "viewer"
+      ]
+    },
+    {
+      "username": "service-account-driftwatch-smoke-admin",
+      "enabled": true,
+      "serviceAccountClientId": "driftwatch-smoke-admin",
+      "realmRoles": [
+        "admin"
+      ]
+    }
+  ]
+}

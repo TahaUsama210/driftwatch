@@ -1,12 +1,16 @@
 openapi: 3.1.0
 info:
   title: Driftwatch API
-  version: 0.1.0
+  version: 0.2.0
   summary: Fleet compliance scanning, scoring and drift detection.
   description: |
     Agents enroll with a shared enrollment token, then submit scan reports with their
     per-host agent token. The API scores each scan, records drift against the host's
     previous scan, and serves read models for the dashboard.
+
+    Dashboard endpoints require an OpenID Connect access token from the `driftwatch`
+    Keycloak realm whose audience includes `driftwatch-api`. Every read needs the
+    `viewer` realm role (`admin` includes it); decommissioning a host needs `admin`.
 
     Domain rules (scoring, drift directions, idempotency, limits) are specified in
     `docs/CONTRACTS.md`.
@@ -16,8 +20,9 @@ info:
 servers:
   - url: http://localhost:8480
     description: Local (docker compose)
-# Read endpoints are public in phase 1 (documented tradeoff); agent endpoints override this.
-security: []
+# Dashboard endpoints need a user or service-account JWT; the agent endpoints override this.
+security:
+  - dashboardAuth: []
 tags:
   - name: agents
     description: Endpoints called by the host agent.
@@ -104,6 +109,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FleetSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/fleet/trend:
     get:
@@ -131,6 +138,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FleetTrend' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/hosts:
     get:
@@ -167,6 +176,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HostPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/hosts/{hostId}:
     get:
@@ -181,6 +192,26 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Host' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+    delete:
+      tags: [hosts]
+      operationId: decommissionHost
+      summary: Decommission a host (admin only).
+      description: |
+        Permanently deletes the host with its scans, results and drift events, and
+        revokes its agent token. An agent that is still running re-enrolls on its next
+        submission and comes back as a new host, so stop the agent first. Requires the
+        `admin` role.
+      parameters:
+        - $ref: '#/components/parameters/HostId'
+      responses:
+        '204':
+          description: Host and its history deleted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/hosts/{hostId}/scans:
@@ -203,6 +234,8 @@ paths:
                 items: { $ref: '#/components/schemas/ScanSummary' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/hosts/{hostId}/drift:
     get:
@@ -230,6 +263,8 @@ paths:
               schema: { $ref: '#/components/schemas/DriftReport' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/scans/{scanId}:
     get:
@@ -248,6 +283,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ScanDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/checks:
     get:
@@ -262,6 +299,8 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/CheckSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/checks/{checkId}:
     get:
@@ -280,6 +319,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CheckDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/events:
     get:
@@ -305,6 +346,8 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/DriftEvent' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
 components:
   securitySchemes:
@@ -316,6 +359,13 @@ components:
       type: http
       scheme: bearer
       description: Per-host token returned by enrollment, prefixed `dwa_`.
+    dashboardAuth:
+      type: openIdConnect
+      openIdConnectUrl: http://localhost:8400/auth/realms/driftwatch/.well-known/openid-configuration
+      description: |
+        Access token (JWT) issued by the `driftwatch` Keycloak realm, sent as
+        `Authorization: Bearer`. The API checks the signature, the issuer, that `aud`
+        includes `driftwatch-api`, and the realm roles in `realm_access.roles`.
 
   parameters:
     HostId:
@@ -332,6 +382,11 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     Unauthorized:
       description: Missing or invalid bearer token.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Authenticated, but the token lacks the required role.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
