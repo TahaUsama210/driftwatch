@@ -1,0 +1,4 @@
+# Rendering-only token for CI (helm template | kubeconform). The chart refuses to
+# render without one, because it must match the control plane's real token.
+enrollment:
+  token: ci-render-only-token-0123456789abcdef

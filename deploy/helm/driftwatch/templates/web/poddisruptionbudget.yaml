@@ -1,0 +1,16 @@
+{{- if .Values.web.podDisruptionBudget.enabled }}
+{{- $component := dict "ctx" . "component" "web" -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.web.podDisruptionBudget.maxUnavailable }}
+  # Evicting a pod that is not ready yet costs nothing, so never let one block a drain.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $component | nindent 6 }}
+{{- end }}

@@ -1,0 +1,177 @@
+suite: NetworkPolicies (default deny, explicit allows)
+templates:
+  - networkpolicies.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: renders a default deny plus one policy per component
+    asserts:
+      - hasDocuments: { count: 5 }
+      - equal:
+          path: spec
+          value:
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: driftwatch
+                app.kubernetes.io/instance: driftwatch
+            policyTypes: [Ingress, Egress]
+        documentSelector: { path: metadata.name, value: driftwatch-default-deny }
+
+  - it: admits only the ingress controller to the dashboard
+    documentSelector: { path: metadata.name, value: driftwatch-web }
+    asserts:
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - namespaceSelector:
+                    matchLabels: { kubernetes.io/metadata.name: kube-system }
+                  podSelector:
+                    matchLabels: { app.kubernetes.io/name: traefik }
+              ports:
+                - { port: http, protocol: TCP }
+
+  - it: lets the dashboard reach the API, Keycloak and DNS only
+    documentSelector: { path: metadata.name, value: driftwatch-web }
+    asserts:
+      - lengthEqual: { path: spec.egress, count: 3 }
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: driftwatch
+                    app.kubernetes.io/instance: driftwatch
+                    app.kubernetes.io/component: api
+            ports:
+              - { port: 8080, protocol: TCP }
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - namespaceSelector:
+                  matchLabels: { kubernetes.io/metadata.name: kube-system }
+                podSelector:
+                  matchLabels: { k8s-app: kube-dns }
+            ports:
+              - { port: 53, protocol: UDP }
+              - { port: 53, protocol: TCP }
+
+  - it: admits the dashboard and the agent namespace to the API
+    documentSelector: { path: metadata.name, value: driftwatch-api }
+    asserts:
+      - lengthEqual: { path: spec.ingress, count: 1 }
+      - equal:
+          path: spec.ingress[0].from[1]
+          value:
+            namespaceSelector:
+              matchLabels: { kubernetes.io/metadata.name: driftwatch-agent }
+            podSelector:
+              matchLabels: { app.kubernetes.io/name: driftwatch-agent }
+
+  - it: lets the API reach Postgres and Keycloak
+    documentSelector: { path: metadata.name, value: driftwatch-api }
+    asserts:
+      - lengthEqual: { path: spec.egress, count: 3 }
+      - contains:
+          path: spec.egress
+          content:
+            to:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: driftwatch
+                    app.kubernetes.io/instance: driftwatch
+                    app.kubernetes.io/component: postgresql
+            ports:
+              - { port: 5432, protocol: TCP }
+
+  - it: gives Postgres and Keycloak no egress at all
+    asserts:
+      - equal: { path: spec.egress, value: [] }
+        documentSelector: { path: metadata.name, value: driftwatch-postgresql }
+      - equal: { path: spec.egress, value: [] }
+        documentSelector: { path: metadata.name, value: driftwatch-keycloak }
+
+  - it: admits only the API to Postgres
+    documentSelector: { path: metadata.name, value: driftwatch-postgresql }
+    asserts:
+      - equal:
+          path: spec.ingress
+          value:
+            - from:
+                - podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: driftwatch
+                      app.kubernetes.io/instance: driftwatch
+                      app.kubernetes.io/component: api
+              ports:
+                - { port: postgresql, protocol: TCP }
+
+  - it: replaces in-cluster egress with the extra rules for external services
+    set:
+      keycloak.enabled: false
+      oidc.issuer: https://idp.example.com/realms/driftwatch
+      postgresql.enabled: false
+      externalDatabase.host: db.example.internal
+      externalDatabase.existingSecret: fleet-db
+      networkPolicy.api.extraEgress:
+        - to: [{ ipBlock: { cidr: 10.20.0.0/16 } }]
+          ports: [{ port: 5432, protocol: TCP }]
+    asserts:
+      - hasDocuments: { count: 3 }
+      - equal:
+          path: spec.egress[1]
+          value:
+            to: [{ ipBlock: { cidr: 10.20.0.0/16 } }]
+            ports: [{ port: 5432, protocol: TCP }]
+        documentSelector: { path: metadata.name, value: driftwatch-api }
+      - lengthEqual: { path: spec.egress, count: 2 }
+        documentSelector: { path: metadata.name, value: driftwatch-api }
+
+  - it: lets the dashboard proxy /auth/ to an external IdP given an extra egress rule
+    set:
+      keycloak.enabled: false
+      oidc.issuer: https://idp.example.com/auth/realms/driftwatch
+      web.keycloakUpstream: https://idp.example.com
+      networkPolicy.web.extraEgress:
+        - to: [{ ipBlock: { cidr: 203.0.113.0/24 } }]
+          ports: [{ port: 443, protocol: TCP }]
+    documentSelector: { path: metadata.name, value: driftwatch-web }
+    asserts:
+      # DNS, the API, then the extra rule; no in-cluster Keycloak rule.
+      - lengthEqual: { path: spec.egress, count: 3 }
+      - equal:
+          path: spec.egress[2]
+          value:
+            to: [{ ipBlock: { cidr: 203.0.113.0/24 } }]
+            ports: [{ port: 443, protocol: TCP }]
+
+  - it: admits Prometheus to the API only when a ServiceMonitor is rendered
+    set:
+      metrics.serviceMonitor.enabled: true
+    capabilities:
+      apiVersions:
+        - monitoring.coreos.com/v1
+    documentSelector: { path: metadata.name, value: driftwatch-api }
+    asserts:
+      - lengthEqual: { path: spec.ingress, count: 2 }
+      - equal:
+          path: spec.ingress[1].from
+          value:
+            - namespaceSelector:
+                matchLabels: { kubernetes.io/metadata.name: monitoring }
+
+  - it: does not open the metrics port without the Prometheus Operator
+    set:
+      metrics.serviceMonitor.enabled: true
+    documentSelector: { path: metadata.name, value: driftwatch-api }
+    asserts:
+      - lengthEqual: { path: spec.ingress, count: 1 }
+
+  - it: renders nothing when disabled
+    set:
+      networkPolicy.enabled: false
+    asserts:
+      - hasDocuments: { count: 0 }

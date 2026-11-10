@@ -1,0 +1,110 @@
+{{- if .Values.postgresql.enabled }}
+{{- $component := dict "ctx" . "component" "postgresql" -}}
+# A single Postgres instance for demos and small installs. No replication, no
+# backups: production should use a managed database (externalDatabase).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  serviceName: {{ include "driftwatch.componentName" (dict "ctx" . "component" "postgresql-hl") }}
+  replicas: 1
+  revisionHistoryLimit: 5
+  # Keep the data when the StatefulSet is deleted or scaled down; deleting the PVC
+  # is a deliberate, manual step.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "driftwatch.labels" $component | nindent 8 }}
+      {{- with .Values.postgresql.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "driftwatch.podDefaults" . | nindent 6 }}
+      securityContext:
+        # uid/gid 70 is the postgres user of the Alpine image.
+        {{- include "driftwatch.podSecurityContext" 70 | nindent 8 }}
+      # Time for a clean shutdown checkpoint (the image stops with SIGINT, "fast").
+      terminationGracePeriodSeconds: 60
+      {{- include "driftwatch.scheduling" .Values.postgresql | nindent 6 }}
+      containers:
+        - name: postgresql
+          image: {{ include "driftwatch.image" (dict "image" .Values.postgresql.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          securityContext:
+            {{- include "driftwatch.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "driftwatch.databaseSecretName" . }}
+                  key: {{ include "driftwatch.databaseSecretKey" . }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          # Probe over TCP: during first-run initdb the entrypoint runs a temporary
+          # server on the Unix socket only, which a socket probe would report as ready.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'exec pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            # Postgres 18 images keep PGDATA in a versioned subdirectory of this path.
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "driftwatch.selectorLabels" $component | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.postgresql.persistence.accessModes | nindent 10 }}
+        {{- with .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+{{- end }}

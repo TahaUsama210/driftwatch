@@ -1,0 +1,37 @@
+{{- if .Values.postgresql.enabled }}
+{{- $component := dict "ctx" . "component" "postgresql" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "driftwatch.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+---
+# Governing Service the StatefulSet requires for stable pod DNS names.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "driftwatch.componentName" (dict "ctx" . "component" "postgresql-hl") }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "driftwatch.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,135 @@
+{{- if .Values.keycloak.enabled }}
+{{- $component := dict "ctx" . "component" "keycloak" -}}
+# Keycloak in dev mode: embedded H2 in an emptyDir, so every start re-imports the
+# realm and forgets sessions. Local clusters only (see the chart README).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  # H2 is per pod, so a second replica would be a second, unrelated IdP.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "driftwatch.labels" $component | nindent 8 }}
+      annotations:
+        checksum/realm: {{ include "driftwatch.realm" . | sha256sum }}
+        {{- with .Values.keycloak.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "driftwatch.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "driftwatch.podSecurityContext" 1000 | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      {{- include "driftwatch.scheduling" .Values.keycloak | nindent 6 }}
+      initContainers:
+        # start-dev re-augments the Quarkus build into lib/quarkus at startup. With a
+        # read-only root filesystem that directory must be writable, so it is seeded
+        # from the image into an emptyDir first. Plain -R: the non-root user cannot
+        # set timestamps on the emptyDir itself, which -a would attempt.
+        - name: seed-quarkus-build
+          image: {{ include "driftwatch.image" (dict "image" .Values.keycloak.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.keycloak.image.pullPolicy }}
+          command: ["cp", "-R", "/opt/keycloak/lib/quarkus/.", "/seed/"]
+          securityContext:
+            {{- include "driftwatch.containerSecurityContext" . | nindent 12 }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - name: quarkus
+              mountPath: /seed
+      containers:
+        - name: keycloak
+          image: {{ include "driftwatch.image" (dict "image" .Values.keycloak.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.keycloak.image.pullPolicy }}
+          args: ["start-dev", "--import-realm"]
+          securityContext:
+            {{- include "driftwatch.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: KC_HTTP_RELATIVE_PATH
+              value: /auth
+            # Fixed public hostname: tokens carry <publicUrl>/auth/realms/driftwatch as
+            # issuer however Keycloak is reached (browser via ingress, API via Service).
+            - name: KC_HOSTNAME
+              value: {{ printf "%s/auth" .Values.publicUrl | quote }}
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: {{ .Values.keycloak.admin.username | quote }}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "driftwatch.keycloakSecretName" . }}
+                  key: {{ include "driftwatch.keycloakSecretKey" . }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 9000
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /auth/health/started
+              port: management
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /auth/health/live
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /auth/health/ready
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+          volumeMounts:
+            - name: quarkus
+              mountPath: /opt/keycloak/lib/quarkus
+            - name: data
+              mountPath: /opt/keycloak/data
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: quarkus
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: realm
+          configMap:
+            name: {{ include "driftwatch.componentName" (dict "ctx" . "component" "keycloak-realm") }}
+{{- end }}

@@ -1,0 +1,2 @@
+{{- /* Renders nothing; fails the install when the enrollment token source is missing or ambiguous. */ -}}
+{{- include "driftwatch-agent.validate" . -}}

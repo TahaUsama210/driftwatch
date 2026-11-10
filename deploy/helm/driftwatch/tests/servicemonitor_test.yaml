@@ -1,0 +1,42 @@
+suite: ServiceMonitor is gated on the Prometheus Operator API
+templates:
+  - api/servicemonitor.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: is off by default, even with the CRD present
+    capabilities:
+      apiVersions: [monitoring.coreos.com/v1]
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: renders nothing when enabled on a cluster without the CRD
+    set:
+      metrics.serviceMonitor.enabled: true
+    asserts:
+      - hasDocuments: { count: 0 }
+
+  - it: scrapes /actuator/prometheus every 15s when enabled and the CRD exists
+    set:
+      metrics.serviceMonitor.enabled: true
+      metrics.serviceMonitor.labels:
+        release: kube-prometheus-stack
+    capabilities:
+      apiVersions: [monitoring.coreos.com/v1]
+    asserts:
+      - isKind: { of: ServiceMonitor }
+      - equal: { path: metadata.labels.release, value: kube-prometheus-stack }
+      - equal:
+          path: spec.endpoints
+          value:
+            - port: http
+              path: /actuator/prometheus
+              interval: 15s
+              scrapeTimeout: 10s
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: driftwatch
+            app.kubernetes.io/instance: driftwatch
+            app.kubernetes.io/component: api

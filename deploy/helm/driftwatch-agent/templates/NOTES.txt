@@ -1,0 +1,18 @@
+The Driftwatch agent DaemonSet is installed in namespace {{ .Release.Namespace }}.
+Each node enrolls with {{ .Values.serverUrl }} and reports every {{ .Values.interval }}.
+
+  kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ include "driftwatch-agent.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "driftwatch-agent.name" . }} --prefix
+{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
+{{- if and $ns (ne (dig "metadata" "labels" "pod-security.kubernetes.io/enforce" "" $ns) "privileged") }}
+
+WARNING: the agent mounts the node's /etc, /usr/lib and /proc through hostPath, which only the "privileged"
+Pod Security level admits. If no pods appear, label this namespace (and keep it
+dedicated to the agent):
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+{{- end }}
+{{- if not .Values.hostNetwork }}
+
+hostNetwork is false, so the network.* checks read the pod's network namespace,
+not the node's. See the chart README.
+{{- end }}

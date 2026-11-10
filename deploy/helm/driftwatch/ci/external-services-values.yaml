@@ -1,0 +1,24 @@
+# Production-shaped install: external Postgres and IdP, existing Secrets, TLS ingress.
+publicUrl: https://driftwatch.example.com
+enrollment:
+  existingSecret: driftwatch-enrollment
+oidc:
+  issuer: https://idp.example.com/realms/driftwatch
+keycloak:
+  enabled: false
+postgresql:
+  enabled: false
+externalDatabase:
+  host: db.example.internal
+  existingSecret: driftwatch-db
+  jdbcParameters: sslmode=verify-full
+ingress:
+  host: driftwatch.example.com
+  tls:
+    - secretName: driftwatch-tls
+      hosts: [driftwatch.example.com]
+networkPolicy:
+  api:
+    extraEgress:
+      - to: [{ ipBlock: { cidr: 10.20.0.0/16 } }]
+        ports: [{ port: 5432, protocol: TCP }]

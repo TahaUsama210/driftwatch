@@ -1,0 +1,19 @@
+apiVersion: v2
+name: driftwatch
+description: >-
+  Driftwatch control plane: the compliance API, the web dashboard, Keycloak (dev mode)
+  for dashboard login, and an optional single-instance Postgres.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.33.0-0"
+home: https://github.com/TahaUsama210/driftwatch
+sources:
+  - https://github.com/TahaUsama210/driftwatch
+keywords:
+  - compliance
+  - cis-benchmark
+  - drift
+maintainers:
+  - name: TahaUsama210
+    url: https://github.com/TahaUsama210

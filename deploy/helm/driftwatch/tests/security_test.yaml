@@ -1,0 +1,130 @@
+suite: every workload meets Pod Security "restricted"
+templates:
+  - api/deployment.yaml
+  - web/deployment.yaml
+  - keycloak/deployment.yaml
+  - postgresql/statefulset.yaml
+  - secrets.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: runs every pod as a fixed non-root user with the runtime's seccomp profile
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+        template: api/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 10001
+        template: api/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 101
+        template: web/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 1000
+        template: keycloak/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 70
+        template: postgresql/statefulset.yaml
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        template: api/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        template: web/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        template: keycloak/deployment.yaml
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+        template: postgresql/statefulset.yaml
+
+  - it: locks down every container (read-only root, no capabilities, no escalation)
+    asserts:
+      - equal: &locked
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+        template: api/deployment.yaml
+      - equal: *locked
+        template: web/deployment.yaml
+      - equal: *locked
+        template: keycloak/deployment.yaml
+      - equal: *locked
+        template: postgresql/statefulset.yaml
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+        template: keycloak/deployment.yaml
+
+  - it: never mounts a service account token or injects service links
+    asserts:
+      - equal: &noToken
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+        template: api/deployment.yaml
+      - equal: *noToken
+        template: web/deployment.yaml
+      - equal: *noToken
+        template: keycloak/deployment.yaml
+      - equal: *noToken
+        template: postgresql/statefulset.yaml
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+        template: api/deployment.yaml
+
+  - it: gives every container requests, limits and readiness and liveness probes
+    asserts:
+      - exists: { path: "spec.template.spec.containers[0].resources.requests" }
+        template: api/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].resources.limits" }
+        template: api/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].resources.limits" }
+        template: web/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].resources.limits" }
+        template: keycloak/deployment.yaml
+      - exists: { path: "spec.template.spec.initContainers[0].resources.limits" }
+        template: keycloak/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].resources.limits" }
+        template: postgresql/statefulset.yaml
+      - exists: { path: "spec.template.spec.containers[0].readinessProbe" }
+        template: web/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].livenessProbe" }
+        template: web/deployment.yaml
+      - exists: { path: "spec.template.spec.containers[0].readinessProbe" }
+        template: postgresql/statefulset.yaml
+      - exists: { path: "spec.template.spec.containers[0].livenessProbe" }
+        template: postgresql/statefulset.yaml
+
+  - it: gives nginx writable emptyDirs for its rendered config and temp paths only
+    template: web/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            - name: tmp
+              mountPath: /tmp
+      - equal:
+          path: spec.template.spec.volumes[0].emptyDir.sizeLimit
+          value: 1Mi

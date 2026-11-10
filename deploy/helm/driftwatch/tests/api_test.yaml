@@ -1,0 +1,148 @@
+suite: api Deployment, Service, PodDisruptionBudget
+templates:
+  - api/deployment.yaml
+  - api/service.yaml
+  - api/poddisruptionbudget.yaml
+  - secrets.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: runs two replicas spread over nodes and rolls without losing capacity
+    template: api/deployment.yaml
+    asserts:
+      - equal: { path: spec.replicas, value: 2 }
+      - equal: { path: spec.strategy.rollingUpdate.maxUnavailable, value: 0 }
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints[0].topologyKey
+          value: kubernetes.io/hostname
+
+  - it: probes the actuator liveness and readiness groups
+    template: api/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /actuator/health/liveness
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /actuator/health/readiness
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /actuator/health/liveness
+
+  - it: configures OIDC from publicUrl and the in-cluster Keycloak
+    template: api/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_OIDC_ISSUER
+            value: http://localhost:38080/auth/realms/driftwatch
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_OIDC_JWKS_URI
+            value: http://driftwatch-keycloak.driftwatch.svc.cluster.local:8080/auth/realms/driftwatch/protocol/openid-connect/certs
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_OIDC_AUDIENCE
+            value: driftwatch-api
+
+  - it: uses an external IdP's issuer and JWKS endpoint when Keycloak is disabled
+    template: api/deployment.yaml
+    set:
+      keycloak.enabled: false
+      oidc.issuer: https://idp.example.com/realms/driftwatch
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_OIDC_JWKS_URI
+            value: https://idp.example.com/realms/driftwatch/protocol/openid-connect/certs
+
+  - it: reads every secret from a Secret, never from a literal
+    template: api/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef: { name: driftwatch-postgresql, key: password }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_ENROLLMENT_TOKEN
+            valueFrom:
+              secretKeyRef: { name: driftwatch-enrollment, key: enrollment-token }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_URL
+            value: jdbc:postgresql://driftwatch-postgresql.driftwatch.svc.cluster.local:5432/driftwatch
+
+  - it: points at an external database and its existing Secret when Postgres is disabled
+    template: api/deployment.yaml
+    set:
+      postgresql.enabled: false
+      externalDatabase:
+        host: db.example.internal
+        port: 6432
+        database: fleet
+        username: fleet_app
+        existingSecret: fleet-db
+        existingSecretKey: db-password
+        jdbcParameters: sslmode=verify-full
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_URL
+            value: jdbc:postgresql://db.example.internal:6432/fleet?sslmode=verify-full
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DB_USER, value: fleet_app }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef: { name: fleet-db, key: db-password }
+
+  - it: pins the image by digest when one is given
+    template: api/deployment.yaml
+    set:
+      api.image.digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/tahausama210/driftwatch-api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+  - it: defaults the image tag to the chart's appVersion
+    template: api/deployment.yaml
+    chart:
+      appVersion: 9.9.9
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/tahausama210/driftwatch-api:9.9.9
+
+  - it: has a PodDisruptionBudget selecting only api pods
+    template: api/poddisruptionbudget.yaml
+    asserts:
+      - isKind: { of: PodDisruptionBudget }
+      - equal: { path: spec.maxUnavailable, value: 1 }
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: driftwatch
+            app.kubernetes.io/instance: driftwatch
+            app.kubernetes.io/component: api
+
+  - it: can drop the PodDisruptionBudget
+    template: api/poddisruptionbudget.yaml
+    set:
+      api.podDisruptionBudget.enabled: false
+    asserts:
+      - hasDocuments: { count: 0 }

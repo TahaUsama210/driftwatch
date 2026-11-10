@@ -1,0 +1,20 @@
+# Control plane on the local k3d cluster. Images are built from this repository
+# and imported into the nodes by up.sh, so they are never pulled. up.sh overrides each
+# tag with a content-derived dev-<image id> tag, so a rebuild rolls the pods.
+publicUrl: http://localhost:38080
+
+api:
+  image:
+    registry: ""
+    repository: driftwatch-api
+    tag: dev
+    pullPolicy: Never
+
+web:
+  image:
+    registry: ""
+    repository: driftwatch-web
+    tag: dev
+    pullPolicy: Never
+
+# Keycloak and Postgres keep the chart's pinned upstream images, pulled by the nodes.

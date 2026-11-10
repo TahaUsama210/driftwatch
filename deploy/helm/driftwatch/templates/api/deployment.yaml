@@ -1,0 +1,114 @@
+{{- $component := dict "ctx" . "component" "api" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "driftwatch.labels" $component | nindent 8 }}
+      annotations:
+        # Roll the pods when an explicit secret value or Secret reference changes.
+        # Generated values never change, and hashing the rendered Secret would hash
+        # a fresh random value on first install.
+        checksum/secrets: {{ toJson (list .Values.enrollment .Values.postgresql.auth .Values.externalDatabase) | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "driftwatch.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "driftwatch.podSecurityContext" 10001 | nindent 8 }}
+      # Spring Boot shuts down gracefully (server.shutdown=graceful) well within this.
+      terminationGracePeriodSeconds: 30
+      {{- include "driftwatch.topologySpread" $component | nindent 6 }}
+      {{- include "driftwatch.scheduling" .Values.api | nindent 6 }}
+      containers:
+        - name: api
+          image: {{ include "driftwatch.image" (dict "image" .Values.api.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          securityContext:
+            {{- include "driftwatch.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+            - name: DB_URL
+              value: {{ include "driftwatch.jdbcUrl" . | quote }}
+            - name: DB_USER
+              value: {{ include "driftwatch.databaseUser" . | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "driftwatch.databaseSecretName" . }}
+                  key: {{ include "driftwatch.databaseSecretKey" . }}
+            - name: DRIFTWATCH_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "driftwatch.enrollmentSecretName" . }}
+                  key: {{ include "driftwatch.enrollmentSecretKey" . }}
+            - name: DRIFTWATCH_STALE_AFTER
+              value: {{ .Values.api.staleAfter | quote }}
+            - name: DRIFTWATCH_OIDC_ISSUER
+              value: {{ include "driftwatch.oidcIssuer" . | quote }}
+            - name: DRIFTWATCH_OIDC_JWKS_URI
+              value: {{ include "driftwatch.oidcJwksUri" . | quote }}
+            - name: DRIFTWATCH_OIDC_AUDIENCE
+              value: {{ .Values.oidc.audience | quote }}
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # The JVM needs up to a minute to start on a small CPU limit; the startup
+          # probe covers that so liveness can stay strict afterwards.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Includes the database, but not Keycloak: signing keys are fetched lazily.
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            # Keep serving while endpoints and Traefik drop this pod, then shut down.
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            # Embedded Tomcat's work and upload directories.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi

@@ -1,0 +1,172 @@
+suite: component toggles and their validation
+templates:
+  - keycloak/configmap.yaml
+  - keycloak/deployment.yaml
+  - keycloak/service.yaml
+  - postgresql/statefulset.yaml
+  - postgresql/service.yaml
+  - web/deployment.yaml
+  - ingress.yaml
+  - secrets.yaml
+  - validate.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: renders Keycloak with the realm file and the contract's settings
+    template: keycloak/deployment.yaml
+    asserts:
+      - equal: { path: spec.replicas, value: 1 }
+      - equal: { path: spec.strategy.type, value: Recreate }
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [start-dev, --import-realm]
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KC_HOSTNAME, value: http://localhost:38080/auth }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KC_HTTP_RELATIVE_PATH, value: /auth }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KC_PROXY_HEADERS, value: xforwarded }
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          value: { path: /auth/health/ready, port: management }
+
+  - it: follows publicUrl into Keycloak's hostname
+    template: keycloak/deployment.yaml
+    set:
+      publicUrl: https://driftwatch.example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KC_HOSTNAME, value: https://driftwatch.example.com/auth }
+
+  - it: ships the realm file unchanged in the ConfigMap
+    template: keycloak/configmap.yaml
+    asserts:
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"realm": "driftwatch"'
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"clientId": "driftwatch-smoke-viewer"'
+
+  - it: drops every Keycloak resource when keycloak.enabled is false
+    set:
+      keycloak.enabled: false
+      oidc.issuer: https://idp.example.com/realms/driftwatch
+    asserts:
+      - hasDocuments: { count: 0 }
+        template: keycloak/configmap.yaml
+      - hasDocuments: { count: 0 }
+        template: keycloak/deployment.yaml
+      - hasDocuments: { count: 0 }
+        template: keycloak/service.yaml
+
+  - it: requires an issuer when Keycloak is disabled
+    template: validate.yaml
+    set:
+      keycloak.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: oidc.issuer is required when keycloak.enabled is false
+
+  - it: points nginx at the API and Keycloak by fully qualified names
+    template: web/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: API_UPSTREAM, value: http://driftwatch-api.driftwatch.svc.cluster.local:8080 }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KEYCLOAK_UPSTREAM, value: http://driftwatch-keycloak.driftwatch.svc.cluster.local:8080 }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: OIDC_AUTHORITY, value: http://localhost:38080/auth/realms/driftwatch }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: OIDC_CLIENT_ID, value: driftwatch-web }
+
+  - it: sets no Keycloak upstream for nginx with an external IdP unless asked
+    template: web/deployment.yaml
+    set:
+      keycloak.enabled: false
+      oidc.issuer: https://idp.example.com/realms/driftwatch
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content: { name: KEYCLOAK_UPSTREAM, value: http://driftwatch-keycloak.driftwatch.svc.cluster.local:8080 }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: OIDC_AUTHORITY, value: https://idp.example.com/realms/driftwatch }
+
+  - it: runs Postgres as a StatefulSet with a retained volume claim
+    template: postgresql/statefulset.yaml
+    asserts:
+      - isKind: { of: StatefulSet }
+      - equal: { path: spec.persistentVolumeClaimRetentionPolicy.whenDeleted, value: Retain }
+      - equal: { path: "spec.volumeClaimTemplates[0].spec.resources.requests.storage", value: 2Gi }
+      - notExists: { path: "spec.volumeClaimTemplates[0].spec.storageClassName" }
+
+  - it: uses the requested StorageClass
+    template: postgresql/statefulset.yaml
+    set:
+      postgresql.persistence.storageClass: fast-ssd
+    asserts:
+      - equal: { path: "spec.volumeClaimTemplates[0].spec.storageClassName", value: fast-ssd }
+
+  - it: drops Postgres when postgresql.enabled is false
+    set:
+      postgresql.enabled: false
+      externalDatabase.host: db.example.internal
+      externalDatabase.existingSecret: fleet-db
+    asserts:
+      - hasDocuments: { count: 0 }
+        template: postgresql/statefulset.yaml
+      - hasDocuments: { count: 0 }
+        template: postgresql/service.yaml
+
+  - it: requires an external host and Secret when Postgres is disabled
+    template: validate.yaml
+    set:
+      postgresql.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: externalDatabase.host is required when postgresql.enabled is false
+
+  - it: refuses to store an external database password itself
+    template: validate.yaml
+    set:
+      postgresql.enabled: false
+      externalDatabase.host: db.example.internal
+    asserts:
+      - failedTemplate:
+          errorMessage: externalDatabase.existingSecret is required when postgresql.enabled is false (the chart never stores an external database password)
+
+  - it: routes every path to the dashboard through Traefik
+    template: ingress.yaml
+    asserts:
+      - equal: { path: spec.ingressClassName, value: traefik }
+      - equal:
+          path: spec.rules[0].http.paths
+          value:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: driftwatch-web
+                  port: { name: http }
+      - notExists: { path: "spec.rules[0].host" }
+
+  - it: adds a host and TLS when configured
+    template: ingress.yaml
+    set:
+      ingress.host: driftwatch.example.com
+      ingress.tls:
+        - secretName: driftwatch-tls
+          hosts: [driftwatch.example.com]
+    asserts:
+      - equal: { path: "spec.rules[0].host", value: driftwatch.example.com }
+      - equal: { path: "spec.tls[0].secretName", value: driftwatch-tls }

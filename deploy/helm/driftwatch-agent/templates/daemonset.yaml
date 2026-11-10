@@ -1,0 +1,130 @@
+{{- /* Host paths the checks read, mounted read-only under /host. */ -}}
+{{- $hostMounts := dict "host-etc" "/etc" "host-proc" "/proc" }}
+{{- if .Values.mountUsrLib }}
+{{- $_ := set $hostMounts "host-usr-lib" "/usr/lib" }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "driftwatch-agent.fullname" . }}
+  labels:
+    {{- include "driftwatch-agent.labels" . | nindent 4 }}
+spec:
+  revisionHistoryLimit: 5
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "driftwatch-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "driftwatch-agent.labels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "driftwatch-agent.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # The agent exits within 5s of SIGTERM, even with a submission in flight.
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        # Root is required: the accounts checks read /etc/shadow and the permission
+        # checks must see files as root does. This root holds one read-only
+        # capability and cannot write to the host (see the container below).
+        runAsUser: 0
+        runAsGroup: 0
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "driftwatch-agent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              # Bypasses file read and directory search permission checks, nothing
+              # else. Needed where /etc/shadow is mode 0000 (RHEL, Fedora, Amazon
+              # Linux), which root cannot open without it. Unlike DAC_OVERRIDE it
+              # grants no write access.
+              add:
+                - DAC_READ_SEARCH
+          env:
+            - name: DRIFTWATCH_SERVER_URL
+              value: {{ .Values.serverUrl | quote }}
+            - name: DRIFTWATCH_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "driftwatch-agent.enrollmentSecretName" . }}
+                  key: {{ include "driftwatch-agent.enrollmentSecretKey" . }}
+            - name: DRIFTWATCH_INTERVAL
+              value: {{ .Values.interval | quote }}
+            - name: DRIFTWATCH_LOG_FORMAT
+              value: {{ .Values.logFormat | quote }}
+            - name: DRIFTWATCH_STATE_DIR
+              value: /var/lib/driftwatch
+            # Hostname, os-release and machine-id are read from the node's files.
+            - name: DRIFTWATCH_ROOT
+              value: /host
+            - name: DRIFTWATCH_PROC
+              value: /host/proc
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Only what the checks read, each read-only: /etc (configuration, accounts,
+          # hostname, machine-id), /usr/lib (where /etc/os-release usually points;
+          # see mountUsrLib) and /proc (sysctls). The agent resolves symlinks under
+          # DRIFTWATCH_ROOT, so /host/etc/os-release -> ../usr/lib/os-release stays
+          # inside these mounts.
+          volumeMounts:
+            {{- range $name, $path := $hostMounts }}
+            - name: {{ $name }}
+              mountPath: {{ printf "/host%s" $path }}
+              readOnly: true
+              recursiveReadOnly: {{ $.Values.hostMountsRecursiveReadOnly }}
+              mountPropagation: None
+            {{- end }}
+            - name: state
+              mountPath: /var/lib/driftwatch
+      volumes:
+        {{- range $name, $path := $hostMounts }}
+        - name: {{ $name }}
+          hostPath:
+            path: {{ $path }}
+            type: Directory
+        {{- end }}
+        - name: state
+          hostPath:
+            path: {{ .Values.stateHostPath }}
+            type: DirectoryOrCreate

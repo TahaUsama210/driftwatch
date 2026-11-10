@@ -1,0 +1,96 @@
+{{- $component := dict "ctx" . "component" "web" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "driftwatch.labels" $component | nindent 8 }}
+      {{- with .Values.web.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "driftwatch.podDefaults" . | nindent 6 }}
+      securityContext:
+        {{- include "driftwatch.podSecurityContext" 101 | nindent 8 }}
+      terminationGracePeriodSeconds: 15
+      {{- include "driftwatch.topologySpread" $component | nindent 6 }}
+      {{- include "driftwatch.scheduling" .Values.web | nindent 6 }}
+      containers:
+        - name: web
+          image: {{ include "driftwatch.image" (dict "image" .Values.web.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          securityContext:
+            {{- include "driftwatch.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: API_UPSTREAM
+              value: {{ include "driftwatch.apiUrl" . | quote }}
+            {{- $keycloakUpstream := .Values.web.keycloakUpstream }}
+            {{- if and (not $keycloakUpstream) .Values.keycloak.enabled }}
+            {{- $keycloakUpstream = include "driftwatch.keycloakUrl" . }}
+            {{- end }}
+            {{- with $keycloakUpstream }}
+            - name: KEYCLOAK_UPSTREAM
+              value: {{ . | quote }}
+            {{- end }}
+            - name: DNS_RESOLVER
+              value: {{ .Values.web.dnsResolver | quote }}
+            - name: OIDC_AUTHORITY
+              value: {{ include "driftwatch.oidcIssuer" . | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.webClientId | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # /healthz is answered by nginx itself, so a slow API never restarts the
+          # dashboard; the API has its own probes.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            # The image's entrypoint renders /etc/nginx/templates/*.template here.
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            # nginx.conf points the pid file and every *_temp_path at /tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-conf
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

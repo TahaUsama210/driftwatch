@@ -1,0 +1,20 @@
+apiVersion: v2
+name: driftwatch-agent
+description: >-
+  Driftwatch node agent as a DaemonSet: scans every node's /etc, /usr/lib and /proc
+  (mounted read-only) against the hardening checks and reports to the Driftwatch API.
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+# recursiveReadOnly mounts are GA from Kubernetes 1.33.
+kubeVersion: ">=1.33.0-0"
+home: https://github.com/TahaUsama210/driftwatch
+sources:
+  - https://github.com/TahaUsama210/driftwatch
+keywords:
+  - compliance
+  - cis-benchmark
+  - daemonset
+maintainers:
+  - name: TahaUsama210
+    url: https://github.com/TahaUsama210

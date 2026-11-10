@@ -1,0 +1,173 @@
+suite: agent DaemonSet
+templates:
+  - daemonset.yaml
+  - secret.yaml
+  - validate.yaml
+release:
+  name: driftwatch-agent
+  namespace: driftwatch-agent
+set:
+  enrollment.token: test-enrollment-token-0123456789
+tests:
+  - it: mounts only /etc, /usr/lib and /proc, read-only, recursively, without propagation
+    template: daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - { name: host-etc, hostPath: { path: /etc, type: Directory } }
+            - { name: host-proc, hostPath: { path: /proc, type: Directory } }
+            - { name: host-usr-lib, hostPath: { path: /usr/lib, type: Directory } }
+            - { name: state, hostPath: { path: /var/lib/driftwatch, type: DirectoryOrCreate } }
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - { name: host-etc, mountPath: /host/etc, readOnly: true, recursiveReadOnly: Enabled, mountPropagation: None }
+            - { name: host-proc, mountPath: /host/proc, readOnly: true, recursiveReadOnly: Enabled, mountPropagation: None }
+            - { name: host-usr-lib, mountPath: /host/usr/lib, readOnly: true, recursiveReadOnly: Enabled, mountPropagation: None }
+            - { name: state, mountPath: /var/lib/driftwatch }
+
+  - it: leaves out /usr/lib on minimal nodes that have none, when asked
+    template: daemonset.yaml
+    set:
+      mountUsrLib: false
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - { name: host-etc, hostPath: { path: /etc, type: Directory } }
+            - { name: host-proc, hostPath: { path: /proc, type: Directory } }
+            - { name: state, hostPath: { path: /var/lib/driftwatch, type: DirectoryOrCreate } }
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          any: true
+          content:
+            mountPath: /host/usr/lib
+
+  - it: never mounts the node's root filesystem
+    template: daemonset.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          any: true
+          content:
+            hostPath: { path: / }
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          any: true
+          content:
+            mountPath: /host
+
+  - it: falls back on runtimes without recursive read-only mounts when asked
+    template: daemonset.yaml
+    set:
+      hostMountsRecursiveReadOnly: IfPossible
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].recursiveReadOnly
+          value: IfPossible
+
+  - it: keeps state in a hostPath so the host identity survives restarts
+    template: daemonset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: { name: state, mountPath: /var/lib/driftwatch }
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: state
+            hostPath: { path: /var/lib/driftwatch, type: DirectoryOrCreate }
+
+  - it: scans the mounted root and procfs
+    template: daemonset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DRIFTWATCH_ROOT, value: /host }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DRIFTWATCH_PROC, value: /host/proc }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: DRIFTWATCH_SERVER_URL, value: http://driftwatch-api.driftwatch.svc.cluster.local:8080 }
+
+  - it: drops every capability except DAC_READ_SEARCH and cannot write its root
+    template: daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [DAC_READ_SEARCH]
+      - equal: { path: spec.template.spec.securityContext.seccompProfile.type, value: RuntimeDefault }
+      - equal: { path: spec.template.spec.automountServiceAccountToken, value: false }
+      - notExists: { path: spec.template.spec.hostPID }
+      - notExists: { path: spec.template.spec.hostIPC }
+      - notExists: { path: spec.template.spec.hostNetwork }
+
+  - it: tolerates every taint so no node goes unscanned
+    template: daemonset.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations
+          value: [{ operator: Exists }]
+
+  - it: reads the enrollment token from the chart's Secret
+    template: daemonset.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_ENROLLMENT_TOKEN
+            valueFrom:
+              secretKeyRef: { name: driftwatch-agent-enrollment, key: enrollment-token }
+
+  - it: reads the enrollment token from an existing Secret and creates none
+    set:
+      enrollment.token: ""
+      enrollment.existingSecret: driftwatch-enrollment
+      enrollment.existingSecretKey: token
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DRIFTWATCH_ENROLLMENT_TOKEN
+            valueFrom:
+              secretKeyRef: { name: driftwatch-enrollment, key: token }
+        template: daemonset.yaml
+      - hasDocuments: { count: 0 }
+        template: secret.yaml
+
+  - it: stores an inline token base64-encoded in its own Secret
+    template: secret.yaml
+    asserts:
+      - equal: { path: data.enrollment-token, value: dGVzdC1lbnJvbGxtZW50LXRva2VuLTAxMjM0NTY3ODk= }
+
+  - it: refuses to install without an enrollment token
+    template: validate.yaml
+    set:
+      enrollment.token: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: enrollment.token or enrollment.existingSecret is required (it must match the control plane's enrollment token)
+
+  - it: refuses an ambiguous token source
+    template: validate.yaml
+    set:
+      enrollment.existingSecret: driftwatch-enrollment
+    asserts:
+      - failedTemplate:
+          errorMessage: set only one of enrollment.token and enrollment.existingSecret
+
+  - it: shares the node network namespace only when asked
+    template: daemonset.yaml
+    set:
+      hostNetwork: true
+    asserts:
+      - equal: { path: spec.template.spec.hostNetwork, value: true }
+      - equal: { path: spec.template.spec.dnsPolicy, value: ClusterFirstWithHostNet }

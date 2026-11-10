@@ -1,0 +1,99 @@
+# Driftwatch node agent. Install into its own namespace, labelled
+# pod-security.kubernetes.io/enforce=privileged: its hostPath mounts are
+# forbidden by the baseline and restricted levels. ../README.md explains why and
+# what the pod is still denied.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io/tahausama210
+  repository: driftwatch-agent
+  # Defaults to the chart's appVersion. A digest, when set, wins over the tag.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Base URL of the Driftwatch API. The default is the in-cluster Service of the
+# driftwatch chart installed as release "driftwatch" in namespace "driftwatch".
+serverUrl: http://driftwatch-api.driftwatch.svc.cluster.local:8080
+
+# The API's enrollment token. Set exactly one of token or existingSecret; it must
+# match the control plane's, so the chart never generates one.
+enrollment:
+  token: ""
+  existingSecret: ""
+  existingSecretKey: enrollment-token
+
+# Go duration between scans (at least 10s).
+interval: 5m
+logFormat: json
+
+# Node directory holding state.json (host id, agent token). A hostPath, so the
+# host keeps its identity across pod restarts and upgrades.
+stateHostPath: /var/lib/driftwatch
+
+# The node's /etc, /usr/lib and /proc are mounted read-only under /host. Enabled
+# makes their submounts (e.g. /proc/sys/fs/binfmt_misc) read-only too, not just the
+# top-level bind mounts; it needs containerd 2.0+ or CRI-O 1.30+ and Linux 5.12+.
+# IfPossible falls back silently on older runtimes.
+hostMountsRecursiveReadOnly: Enabled
+
+# Mount the node's /usr/lib, where /etc/os-release is usually a symlink to. Turn it
+# off for minimal node images that have no /usr/lib (k3d's k3s nodes), since the
+# hostPath must exist as a directory for the pod to start.
+mountUsrLib: true
+
+# Share the node's network namespace. The four network.* checks read net.ipv4
+# sysctls, which are per network namespace: without this they describe the pod's
+# namespace, not the node's. With it, NetworkPolicies no longer apply to the agent
+# and the control plane must admit node addresses (networkPolicy.api.extraIngress).
+hostNetwork: false
+
+# Run on every node, including tainted control-plane and dedicated nodes: a node
+# that is not scanned is a compliance blind spot.
+tolerations:
+  - operator: Exists
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+affinity: {}
+
+priorityClassName: ""
+
+podAnnotations: {}
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+networkPolicy:
+  enabled: true
+  # The API pods the agent may call, on port 8080.
+  api:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: driftwatch
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: driftwatch
+        app.kubernetes.io/component: api
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
