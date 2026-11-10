@@ -6,6 +6,8 @@ import type {
   HostStatus,
   Problem,
 } from '../api/types';
+import { rolesFromMockToken } from '../auth/mockToken';
+import type { Role } from '../auth/types';
 import { MockApiError, type MockFleet } from './fleet';
 
 /** An RFC 9457 response, as the real API sends for every error. */
@@ -35,12 +37,38 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[]): T
   return allowed.find((candidate) => candidate === value);
 }
 
+/**
+ * The authorization matrix from CONTRACTS.md: no or unknown bearer token is 401 with
+ * WWW-Authenticate, a token without the role is 403. Admin includes viewer.
+ */
+export function authorize(request: Request, role: Role): HttpResponse<Problem> | undefined {
+  const header = request.headers.get('Authorization') ?? '';
+  const roles = header.startsWith('Bearer ') ? rolesFromMockToken(header.slice(7)) : undefined;
+  if (!roles) {
+    const response = problemResponse({
+      type: 'about:blank',
+      title: 'Unauthorized',
+      status: 401,
+      detail: 'A valid bearer token is required.',
+    });
+    response.headers.set('WWW-Authenticate', 'Bearer');
+    return response;
+  }
+  if (roles.includes(role) || (role === 'viewer' && roles.includes('admin'))) return undefined;
+  return problemResponse({
+    type: 'about:blank',
+    title: 'Forbidden',
+    status: 403,
+    detail: `This operation requires the ${role} role.`,
+  });
+}
+
 interface HandlerOptions {
   /** Awaited before every response, e.g. to simulate network latency in the browser. */
   latency?: () => Promise<void>;
 }
 
-/** Every read endpoint of contracts/openapi.yaml, answered by a {@link MockFleet}. */
+/** Every dashboard endpoint of contracts/openapi.yaml, answered by a {@link MockFleet}. */
 export function createHandlers(
   fleet: MockFleet,
   { latency }: HandlerOptions = {},
@@ -57,6 +85,22 @@ export function createHandlers(
   };
 
   return [
+    // Every read needs viewer. Returning nothing falls through to the endpoint below.
+    http.get('/api/v1/*', ({ request }) => authorize(request, 'viewer')),
+
+    http.delete<{ hostId: string }>('/api/v1/hosts/:hostId', async ({ request, params }) => {
+      const denied = authorize(request, 'admin');
+      if (denied) return denied;
+      await latency?.();
+      try {
+        fleet.decommission(params.hostId);
+        return new HttpResponse(null, { status: 204 });
+      } catch (error) {
+        if (error instanceof MockApiError) return problemResponse(toProblem(error));
+        throw error;
+      }
+    }),
+
     http.get('/api/v1/fleet/summary', () => respond(() => fleet.summary())),
 
     http.get('/api/v1/fleet/trend', ({ request }) => {

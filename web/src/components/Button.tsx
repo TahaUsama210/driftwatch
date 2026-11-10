@@ -3,7 +3,7 @@ import { cx } from '../lib/cx';
 import { buttonClasses } from './buttonStyles';
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'secondary' | 'ghost';
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   size?: 'sm' | 'md';
 }
 

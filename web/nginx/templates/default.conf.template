@@ -1,6 +1,40 @@
 # Rendered at container start by the nginx image's entrypoint (envsubst) into
 # /etc/nginx/conf.d/default.conf. Only the variables named in NGINX_ENVSUBST_FILTER
-# (API_UPSTREAM, DNS_RESOLVER) are substituted; nginx's own $variables are untouched.
+# (see the Dockerfile) are substituted; nginx's own $variables are untouched. The values
+# are checked first by /docker-entrypoint.d/15-driftwatch-check-env.sh.
+
+# Only the silent sign-in callback may be framed, and only by this origin.
+map $uri $dw_frame_ancestors {
+    default             "'none'";
+    /silent-renew.html  "'self'";
+}
+map $uri $dw_x_frame_options {
+    default             "DENY";
+    /silent-renew.html  "SAMEORIGIN";
+}
+
+# X-Forwarded-* for Keycloak. Keep what an ingress in front of us already set
+# (Traefik in k3d); otherwise describe this request as the browser made it. Keycloak's
+# public URLs are pinned by KC_HOSTNAME, so these cannot change the issuer or redirect
+# URLs; they tell Keycloak the original scheme (secure cookies) and client address.
+map $http_x_forwarded_proto $dw_forwarded_proto {
+    default $http_x_forwarded_proto;
+    ""      $scheme;
+}
+map $http_x_forwarded_host $dw_forwarded_host {
+    default $http_x_forwarded_host;
+    ""      $http_host;
+}
+map $http_host $dw_host_port {
+    "~:(?<port>[0-9]+)$" $port;
+    default              "";
+}
+map "$http_x_forwarded_port|$dw_host_port|$dw_forwarded_proto" $dw_forwarded_port {
+    "~^(?<forwarded>[0-9]+)\|"  $forwarded;
+    "~^\|(?<from_host>[0-9]+)\|" $from_host;
+    "~^\|\|https$"             443;
+    default                    80;
+}
 
 server {
     listen 8080;
@@ -8,10 +42,15 @@ server {
     root /usr/share/nginx/html;
     server_tokens off;
 
-    # Resolve the API per request through Docker's DNS instead of once at startup, so
-    # this container starts before the API exists and follows it across restarts.
+    # Keycloak's session cookies make request headers larger than nginx's 1k default.
+    large_client_header_buffers 4 16k;
+
+    # Resolve upstreams per request through Docker's DNS instead of once at startup, so
+    # this container starts before the API or Keycloak exist and follows them across
+    # restarts.
     resolver ${DNS_RESOLVER} valid=10s ipv6=off;
     set $api_upstream ${API_UPSTREAM};
+    set $keycloak_upstream ${KEYCLOAK_UPSTREAM};
 
     gzip on;
     gzip_vary on;
@@ -28,6 +67,15 @@ server {
         access_log off;
         default_type text/plain;
         return 200 "ok\n";
+    }
+
+    # Runtime configuration for the SPA, from OIDC_AUTHORITY and OIDC_CLIENT_ID. Never
+    # cached, so a changed deployment takes effect on the next page load.
+    location = /config.json {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        include /etc/nginx/snippets/security-headers.conf;
+        return 200 '{"oidc":{"authority":"${OIDC_AUTHORITY}","clientId":"${OIDC_CLIENT_ID}"}}';
     }
 
     # With a variable in proxy_pass and no URI part, the original request URI is
@@ -52,11 +100,37 @@ server {
         return 404;
     }
 
-    # When the API cannot be reached at all, answer in the API's own error format so
-    # the dashboard can show a useful message. Errors the API itself returns pass through.
+    # Keycloak runs under /auth (KC_HTTP_RELATIVE_PATH), so the SPA, the identity
+    # provider and the API share one origin. Keycloak sends its own CSP and framing
+    # headers for its pages, so the SPA's headers are not added here.
+    location /auth/ {
+        add_header_inherit off;
+        proxy_pass $keycloak_upstream;
+        include /etc/nginx/snippets/keycloak-proxy.conf;
+    }
+
+    # The admin console and the master realm are not published on the dashboard's
+    # origin. Reach them through the Keycloak service directly (port-forward, exec).
+    # A regex, so the bare paths are covered too: /auth/realms/master (no slash) is the
+    # master realm's info document and /auth/admin redirects to the console. It is
+    # matched against the decoded, slash-merged URI, so /auth//admin/ and %-encodings
+    # land here as well.
+    location ~ ^/auth/(admin|realms/master)(/|$) {
+        return 404;
+    }
+
+    # When an upstream cannot be reached at all, answer in the API's own error format so
+    # the dashboard can show a useful message. Errors the upstream returns pass through.
     location @api_unreachable {
         default_type application/problem+json;
         return 502 '{"type":"about:blank","title":"API unreachable","status":502,"detail":"The dashboard could not reach the Driftwatch API. Check that it is running."}';
+    }
+
+    location @keycloak_unreachable {
+        add_header_inherit off;
+        add_header Cache-Control "no-store" always;
+        default_type application/problem+json;
+        return 502 '{"type":"about:blank","title":"Identity provider unreachable","status":502,"detail":"The dashboard could not reach Keycloak. Check that it is running."}';
     }
 
     # Vite's output is content-hashed, so it can be cached forever. No `always`: a 404
@@ -68,12 +142,13 @@ server {
     }
 
     # The shell must always be revalidated so a deploy is picked up immediately.
-    location = /index.html {
+    # /silent-renew.html is the one page that may be framed (by this origin).
+    location ~ ^/(index|silent-renew)\.html$ {
         add_header Cache-Control "no-cache" always;
         include /etc/nginx/snippets/security-headers.conf;
     }
 
-    # Client-side routes (/hosts/<id>, /checks/<id>, ...) all receive the SPA shell.
+    # Client-side routes (/hosts/<id>, /signin-callback, ...) all receive the SPA shell.
     location / {
         try_files $uri $uri/ /index.html;
         add_header Cache-Control "no-cache" always;

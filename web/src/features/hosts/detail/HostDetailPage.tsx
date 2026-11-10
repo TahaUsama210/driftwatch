@@ -9,6 +9,7 @@ import { QueryState } from '../../../components/QueryState';
 import { LoadingRegion, Skeleton } from '../../../components/Skeleton';
 import { NotFound } from '../../not-found/NotFoundPage';
 import { useHost } from '../api';
+import { DecommissionHost } from './DecommissionHost';
 import { DriftPanel } from './DriftPanel';
 import { HostEvents } from './HostEvents';
 import { HostFacts } from './HostFacts';
@@ -48,6 +49,7 @@ function HostDetail({ host }: { host: Host }) {
           <>
             <HostStatusBadge status={host.status} />
             <ScoreBadge score={host.latestScan?.score} />
+            <DecommissionHost host={host} />
           </>
         }
       />

@@ -1,6 +1,7 @@
 import { Activity, LayoutDashboard, ListChecks, Server, type LucideIcon } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { Link, NavLink, Outlet, ScrollRestoration, useLocation, useNavigation } from 'react-router';
+import { UserMenu } from '../auth/UserMenu';
 import { Logo } from '../components/Logo';
 import { cx } from '../lib/cx';
 import { ThemeToggle } from './ThemeToggle';
@@ -63,8 +64,9 @@ export function AppShell() {
               ))}
             </ul>
           </nav>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
+            <UserMenu />
           </div>
         </div>
         {navigation.state === 'loading' ? (
