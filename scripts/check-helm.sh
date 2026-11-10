@@ -22,8 +22,10 @@ readonly KUBERNETES_VERSION="${KUBERNETES_VERSION:-1.36.6}"
 # CRDs (the optional ServiceMonitor) are validated against the community catalog.
 readonly CRD_SCHEMAS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
+# As the invoking user on Linux: helm-unittest creates tests/__snapshot__ in the checkout,
+# which the image's own user (1000) can't do in a CI checkout owned by another uid.
 helm() {
-  run_tool --entrypoint helm -- "$HELM_IMAGE" "$@"
+  run_tool ${HOST_USER[@]+"${HOST_USER[@]}"} --env HOME=/tmp --entrypoint helm -- "$HELM_IMAGE" "$@"
 }
 
 kubeconform() {
