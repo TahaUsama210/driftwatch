@@ -1,0 +1,43 @@
+# Alertmanager for the Driftwatch compose stack. Routes on the `severity` label
+# every Driftwatch alert carries; each severity has its own webhook path on the
+# alert-sink, so its log shows which route a notification took.
+route:
+  receiver: sink-warning
+  # Fleet-wide grouping: twenty hosts failing the same control are one
+  # notification listing twenty alerts, not twenty pages.
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: sink-critical
+      group_wait: 10s
+      repeat_interval: 1h
+    - matchers: ['severity="warning"']
+      receiver: sink-warning
+    # Regressions are a heads-up, and one notification per 10-minute window is
+    # enough; repeating them would train people to ignore the channel.
+    - matchers: ['severity="info"']
+      receiver: sink-info
+      repeat_interval: 12h
+
+inhibit_rules:
+  # While the API is down its per-host series disappear, so every other
+  # Driftwatch alert would resolve or go quiet for the wrong reason.
+  - source_matchers: ['alertname="DriftwatchApiDown"']
+    target_matchers: ['alertname=~"Driftwatch.+"', 'alertname!="DriftwatchApiDown"']
+
+receivers:
+  - name: sink-critical
+    webhook_configs:
+      - url: http://alert-sink:8080/alerts/critical
+        send_resolved: true
+  - name: sink-warning
+    webhook_configs:
+      - url: http://alert-sink:8080/alerts/warning
+        send_resolved: true
+  - name: sink-info
+    webhook_configs:
+      - url: http://alert-sink:8080/alerts/info
+        send_resolved: true

@@ -1,0 +1,90 @@
+# Driftwatch alerting rules (docs/CONTRACTS.md, Phase 2 > Alerts).
+#
+# Every alert carries a `severity` label (Alertmanager routes on it) and the
+# annotations summary, description and runbook_url. Per-host alerts keep the
+# series' host_id (identity) and hostname (for humans) labels.
+#
+# Tests: prometheus/tests/driftwatch_test.yml (see README.md).
+groups:
+  - name: driftwatch
+    rules:
+      # A failed scrape sets up to 0. absent() also covers the job vanishing from
+      # the scrape config, which would otherwise silence every rule below.
+      - alert: DriftwatchApiDown
+        expr: up{job="driftwatch-api"} == 0 or absent(up{job="driftwatch-api"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Driftwatch API is down
+          description: >-
+            Prometheus has had no successful scrape of job {{ $labels.job }} for over a
+            minute. Agents cannot submit scans and every other Driftwatch alert is
+            blind until it is back.
+          runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchapidown
+
+      # The API exports last contact as Unix seconds, so the age is computed at
+      # evaluation time and keeps growing between agent check-ins.
+      - alert: DriftwatchHostNotReporting
+        expr: time() - driftwatch_host_last_seen_timestamp_seconds{job="driftwatch-api"} > 600
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host {{ $labels.hostname }} has not reported for {{ $value | humanizeDuration }}"
+          description: >-
+            Host {{ $labels.hostname }} (id {{ $labels.host_id }}) last contacted the API
+            {{ $value | humanizeDuration }} ago. Its compliance data is stale.
+          runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostnotreporting
+          dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+      # The series' own `severity` label is the check severity; it is aggregated
+      # away so the alert's `severity` label is unambiguous. keep_firing_for rides
+      # out a missed scrape (which makes the series stale) instead of resolving and
+      # re-arming the 5m timer.
+      - alert: DriftwatchCriticalControlFailing
+        expr: max without (severity) (driftwatch_host_failing_checks{job="driftwatch-api", severity="critical"}) > 0
+        for: 5m
+        keep_firing_for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host {{ $labels.hostname }} fails {{ $value }} critical check(s)"
+          description: >-
+            Host {{ $labels.hostname }} (id {{ $labels.host_id }}) has failed or errored on
+            {{ $value }} critical-severity check(s) in its latest scan for at least 5 minutes.
+          runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchcriticalcontrolfailing
+          dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+      # No series exists while a host's score is null (nothing applicable), so such
+      # hosts never fire. keep_firing_for stops a score hovering around 70 from
+      # producing a resolve/fire pair on every scan.
+      - alert: DriftwatchHostComplianceLow
+        expr: driftwatch_host_score{job="driftwatch-api"} < 70
+        for: 15m
+        keep_firing_for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host {{ $labels.hostname }} compliance score is {{ $value }}"
+          description: >-
+            Host {{ $labels.hostname }} (id {{ $labels.host_id }}) has scored below 70 for at
+            least 15 minutes; its latest score is {{ $value }}.
+          runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostcompliancelow
+          dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+      # One alert per host. increase() absorbs the reset when the API restarts (the
+      # counter is in-process). It only sees an event once the host's series already
+      # has a sample, so the counter must start at 0 before its first increment.
+      - alert: DriftwatchComplianceRegression
+        expr: sum by (host_id, hostname) (increase(driftwatch_host_drift_events_total{job="driftwatch-api", direction="REGRESSED"}[10m])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Host {{ $labels.hostname }} regressed in the last 10 minutes"
+          description: >-
+            About {{ $value | printf "%.0f" }} check(s) on host {{ $labels.hostname }}
+            (id {{ $labels.host_id }}) went from passing (or not applicable) to failing in
+            the last 10 minutes.
+          runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchcomplianceregression
+          dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance

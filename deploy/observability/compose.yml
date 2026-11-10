@@ -1,0 +1,144 @@
+# Driftwatch observability stack: Prometheus, Alertmanager, Grafana and a webhook
+# sink that logs every notification Alertmanager sends.
+#
+# The root docker-compose.yml `include:`s this file, so these services join the
+# default project network and reach the API as api:8080:
+#
+#   docker compose --profile observability up -d --build --wait
+#
+# Every service is behind the `observability` profile, so a plain `docker compose up`
+# leaves it out. Ports are bound to 127.0.0.1 only (docs/CONTRACTS.md, Phase 2 ports).
+# Paths below are relative to this file. See README.md in this directory.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+# Shared hardening. Each image already runs as a non-root user; the root
+# filesystems are read-only, with state in named volumes and scratch in tmpfs.
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+  logging: *logging
+
+services:
+  prometheus:
+    <<: *hardened
+    image: prom/prometheus:v3.15.1
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      # Used in alert "source" links, so they open on the host-side port.
+      - --web.external-url=http://localhost:39090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:39090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+      start_interval: 1s
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+
+  alertmanager:
+    <<: *hardened
+    image: prom/alertmanager:v0.34.1
+    profiles: [observability]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=http://localhost:39093
+      # Single instance: no gossip peers to find.
+      - --cluster.listen-address=
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:39093:9093"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9093/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+      start_interval: 1s
+    depends_on:
+      alert-sink:
+        condition: service_healthy
+
+  # Stand-in for a pager or chat webhook: logs each request, body included, as one
+  # JSON line. `docker compose logs -f alert-sink` shows delivered notifications.
+  alert-sink:
+    <<: *hardened
+    image: mendhak/http-https-echo:42
+    profiles: [observability]
+    environment:
+      HTTP_PORT: "8080"
+      LOG_WITHOUT_NEWLINE: "true"
+      LOG_IGNORE_PATH: "^/healthz$"
+      ECHO_BACK_TO_CLIENT: "false"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      start_interval: 1s
+
+  grafana:
+    <<: *hardened
+    image: grafana/grafana:13.2.4
+    profiles: [observability]
+    environment:
+      # Demo defaults only; set both in .env for anything reachable by other people.
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-driftwatch-demo}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: http://localhost:33000
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/driftwatch-fleet.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_LOG_MODE: console
+      # Use the plugins bundled in the pinned image. Grafana otherwise downloads
+      # newer versions at startup, which unregisters the bundled Prometheus plugin
+      # and then fails on the read-only filesystem.
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:33000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
