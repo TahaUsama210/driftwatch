@@ -84,7 +84,7 @@ services:
   # JSON line. `docker compose logs -f alert-sink` shows delivered notifications.
   alert-sink:
     <<: *hardened
-    image: mendhak/http-https-echo:42
+    image: mendhak/http-https-echo:43
     profiles: [observability]
     environment:
       HTTP_PORT: "8080"
