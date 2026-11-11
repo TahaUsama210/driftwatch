@@ -1,0 +1,16 @@
+# Provider caches and local state. Lock files (.terraform.lock.hcl) are committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Real variable values and backend settings stay local; the *.example files are templates.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+backend.hcl
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

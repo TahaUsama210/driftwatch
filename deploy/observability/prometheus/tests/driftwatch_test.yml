@@ -1,0 +1,426 @@
+# Unit tests for prometheus/rules/driftwatch.yml (see README.md for how to run them).
+#
+# Samples are 15 s apart, matching the scrape and evaluation interval, so "AxN" is
+# N+1 samples spanning N x 15 s. Each alert has cases that fire, cases that must not,
+# both sides of its threshold and `for:` boundary, and recovery.
+rule_files:
+  - ../rules/driftwatch.yml
+
+evaluation_interval: 15s
+
+tests:
+  # --- DriftwatchApiDown ------------------------------------------------------
+  - name: api down fires after exactly one minute, not before
+    interval: 15s
+    input_series:
+      - series: 'up{job="driftwatch-api", instance="api:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - alertname: DriftwatchApiDown
+        eval_time: 45s
+        exp_alerts: []
+      - alertname: DriftwatchApiDown
+        eval_time: 1m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+            exp_annotations: &api-down-annotations
+              summary: Driftwatch API is down
+              description: >-
+                Prometheus has had no successful scrape of job driftwatch-api for over a
+                minute. Agents cannot submit scans and every other Driftwatch alert is
+                blind until it is back.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchapidown
+
+  - name: api up never fires
+    interval: 15s
+    input_series:
+      - series: 'up{job="driftwatch-api", instance="api:8080"}'
+        values: '1x20'
+    alert_rule_test:
+      - alertname: DriftwatchApiDown
+        eval_time: 5m
+        exp_alerts: []
+
+  - name: one successful scrape in between resets the one-minute timer
+    interval: 15s
+    input_series:
+      # Down at 0-30s, up at 45s, down at 60-105s, up again from 120s.
+      - series: 'up{job="driftwatch-api", instance="api:8080"}'
+        values: '0 0 0 1 0 0 0 0 1 1'
+    alert_rule_test:
+      - alertname: DriftwatchApiDown
+        eval_time: 1m
+        exp_alerts: []
+      - alertname: DriftwatchApiDown
+        eval_time: 2m15s
+        exp_alerts: []
+
+  - name: api down resolves once scrapes succeed again
+    interval: 15s
+    input_series:
+      - series: 'up{job="driftwatch-api", instance="api:8080"}'
+        values: '0x8 1x8'
+    alert_rule_test:
+      - alertname: DriftwatchApiDown
+        eval_time: 2m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+            exp_annotations: *api-down-annotations
+      - alertname: DriftwatchApiDown
+        eval_time: 2m15s
+        exp_alerts: []
+
+  - name: api down fires when the scrape job is missing altogether
+    interval: 15s
+    input_series:
+      - series: 'up{job="prometheus", instance="localhost:9090"}'
+        values: '1x10'
+    alert_rule_test:
+      - alertname: DriftwatchApiDown
+        eval_time: 1m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+            exp_annotations: *api-down-annotations
+
+  # --- DriftwatchHostNotReporting --------------------------------------------
+  # Last seen at t=0, so the age equals the evaluation time: it first exceeds
+  # 600 s at 10m15s (at 10m it is exactly 600, not over) and the alert fires two
+  # minutes later, at 12m15s. A ">=" threshold would fire at 12m instead.
+  - name: silent host fires two minutes after passing ten minutes of silence
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_last_seen_timestamp_seconds{job="driftwatch-api", instance="api:8080", host_id="h-rocky", hostname="rocky-web"}'
+        values: '0x60'
+      - series: 'driftwatch_host_last_seen_timestamp_seconds{job="driftwatch-api", instance="api:8080", host_id="h-ubuntu", hostname="ubuntu-hardened"}'
+        values: '0+15x60'
+    alert_rule_test:
+      - alertname: DriftwatchHostNotReporting
+        eval_time: 12m
+        exp_alerts: []
+      - alertname: DriftwatchHostNotReporting
+        eval_time: 12m15s
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-rocky
+              hostname: rocky-web
+            exp_annotations:
+              summary: Host rocky-web has not reported for 12m 15s
+              description: >-
+                Host rocky-web (id h-rocky) last contacted the API
+                12m 15s ago. Its compliance data is stale.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostnotreporting
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+  - name: host that reports again resolves
+    interval: 15s
+    input_series:
+      # Silent from t=0, checks in again at 14m.
+      - series: 'driftwatch_host_last_seen_timestamp_seconds{job="driftwatch-api", instance="api:8080", host_id="h-rocky", hostname="rocky-web"}'
+        values: '0x55 840+15x20'
+    alert_rule_test:
+      - alertname: DriftwatchHostNotReporting
+        eval_time: 13m30s
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-rocky
+              hostname: rocky-web
+            exp_annotations:
+              summary: Host rocky-web has not reported for 13m 30s
+              description: >-
+                Host rocky-web (id h-rocky) last contacted the API
+                13m 30s ago. Its compliance data is stale.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostnotreporting
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+      - alertname: DriftwatchHostNotReporting
+        eval_time: 14m
+        exp_alerts: []
+
+  # --- DriftwatchCriticalControlFailing --------------------------------------
+  - name: critical failures fire after five minutes, other severities never do
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy", severity="critical"}'
+        values: '2x30'
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy", severity="high"}'
+        values: '3x30'
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-rocky", hostname="rocky-web", severity="critical"}'
+        values: '0x30'
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-rocky", hostname="rocky-web", severity="high"}'
+        values: '4x30'
+    alert_rule_test:
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 4m45s
+        exp_alerts: []
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 5m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: &critical-debian-annotations
+              summary: Host debian-legacy fails 2 critical check(s)
+              description: >-
+                Host debian-legacy (id h-debian) has failed or errored on
+                2 critical-severity check(s) in its latest scan for at least 5 minutes.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchcriticalcontrolfailing
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+  - name: a missed scrape does not resolve a firing critical alert
+    interval: 15s
+    input_series:
+      # Firing from 5m; the scrape at 6m fails (stale marker), the next one succeeds.
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy", severity="critical"}'
+        values: '2x23 stale 2x10'
+    alert_rule_test:
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 6m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: *critical-debian-annotations
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 6m15s
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: *critical-debian-annotations
+
+  - name: a fixed critical control resolves after the keep-firing window
+    interval: 15s
+    input_series:
+      # Fixed from 6m: kept firing until 2m after the last failing sample.
+      - series: 'driftwatch_host_failing_checks{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy", severity="critical"}'
+        values: '2x23 0x30'
+    alert_rule_test:
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 7m
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: *critical-debian-annotations
+      - alertname: DriftwatchCriticalControlFailing
+        eval_time: 9m
+        exp_alerts: []
+
+  # --- DriftwatchHostComplianceLow -------------------------------------------
+  - name: a score just under 70 fires after fifteen minutes; exactly 70 never does
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_score{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy"}'
+        values: '69.9x80'
+      - series: 'driftwatch_host_score{job="driftwatch-api", instance="api:8080", host_id="h-rocky", hostname="rocky-web"}'
+        values: '70x80'
+    alert_rule_test:
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 14m45s
+        exp_alerts: []
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 15m
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations:
+              summary: Host debian-legacy compliance score is 69.9
+              description: >-
+                Host debian-legacy (id h-debian) has scored below 70 for at
+                least 15 minutes; its latest score is 69.9.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostcompliancelow
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+  - name: a scan above 70 before the alert fires restarts the fifteen minutes
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_score{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy"}'
+        values: '65x40 75 65x40'
+    alert_rule_test:
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 16m
+        exp_alerts: []
+
+  - name: a firing alert rides out a brief recovery and resolves after a lasting one
+    interval: 15s
+    input_series:
+      # Fires at 15m; 71 from 16m15s to 17m; 65 again until 20m15s; 80 from 20m30s.
+      - series: 'driftwatch_host_score{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy"}'
+        values: '65x64 71x3 65x12 80x40'
+    alert_rule_test:
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 17m
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: &low-debian-65
+              summary: Host debian-legacy compliance score is 65
+              description: >-
+                Host debian-legacy (id h-debian) has scored below 70 for at
+                least 15 minutes; its latest score is 65.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchhostcompliancelow
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 24m
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: driftwatch-api
+              instance: api:8080
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations: *low-debian-65
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 26m
+        exp_alerts: []
+
+  - name: a host without a score never fires
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_last_seen_timestamp_seconds{job="driftwatch-api", instance="api:8080", host_id="h-new", hostname="fresh-host"}'
+        values: '0+15x80'
+    alert_rule_test:
+      - alertname: DriftwatchHostComplianceLow
+        eval_time: 20m
+        exp_alerts: []
+
+  # --- DriftwatchComplianceRegression ----------------------------------------
+  # One REGRESSED event on alpine-drifting lands between 5m and 5m15s. The alert
+  # fires on the next evaluation, for that host only, and lasts until the 10m
+  # window no longer contains the increase.
+  - name: a regression fires immediately for that host only and clears ten minutes later
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="REGRESSED"}'
+        values: '0x20 1x60'
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="RESOLVED"}'
+        values: '0x80'
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-ubuntu", hostname="ubuntu-hardened", direction="REGRESSED"}'
+        values: '0x80'
+    alert_rule_test:
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 5m
+        exp_alerts: []
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 5m15s
+        exp_alerts:
+          - exp_labels: &regression-alpine-labels
+              severity: info
+              host_id: h-alpine
+              hostname: alpine-drifting
+            exp_annotations: &regression-alpine-annotations
+              summary: Host alpine-drifting regressed in the last 10 minutes
+              description: >-
+                About 1 check(s) on host alpine-drifting
+                (id h-alpine) went from passing (or not applicable) to failing in
+                the last 10 minutes.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchcomplianceregression
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 14m45s
+        exp_alerts:
+          - exp_labels: *regression-alpine-labels
+            exp_annotations: *regression-alpine-annotations
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 15m15s
+        exp_alerts: []
+
+  - name: two hosts regressing give one alert each
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="REGRESSED"}'
+        values: '0x20 1x40'
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-debian", hostname="debian-legacy", direction="REGRESSED"}'
+        values: '0x24 1x40'
+    alert_rule_test:
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 7m
+        exp_alerts:
+          - exp_labels: *regression-alpine-labels
+            exp_annotations: *regression-alpine-annotations
+          - exp_labels:
+              severity: info
+              host_id: h-debian
+              hostname: debian-legacy
+            exp_annotations:
+              summary: Host debian-legacy regressed in the last 10 minutes
+              description: >-
+                About 1 check(s) on host debian-legacy
+                (id h-debian) went from passing (or not applicable) to failing in
+                the last 10 minutes.
+              runbook_url: https://github.com/TahaUsama210/driftwatch/blob/main/deploy/observability/RUNBOOK.md#driftwatchcomplianceregression
+              dashboard_url: http://localhost:33000/d/driftwatch-fleet/driftwatch-fleet-compliance
+
+  - name: resolved and changed drift never fires
+    interval: 15s
+    input_series:
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="REGRESSED"}'
+        values: '0x40'
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="RESOLVED"}'
+        values: '0+1x40'
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="CHANGED"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 10m
+        exp_alerts: []
+
+  - name: an api restart resetting the counter is not a regression
+    interval: 15s
+    input_series:
+      # Restart at 5m: a scrape gap, then the counter is back at 0.
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="REGRESSED"}'
+        values: '7x19 stale 0x40'
+    alert_rule_test:
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 5m15s
+        exp_alerts: []
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 10m
+        exp_alerts: []
+
+  - name: a regression right after an api restart still fires
+    interval: 15s
+    input_series:
+      # Restart at 5m (counter back at 0), then one regression between 6m15s and 6m30s.
+      - series: 'driftwatch_host_drift_events_total{job="driftwatch-api", instance="api:8080", host_id="h-alpine", hostname="alpine-drifting", direction="REGRESSED"}'
+        values: '7x19 stale 0x4 1x40'
+    alert_rule_test:
+      - alertname: DriftwatchComplianceRegression
+        eval_time: 6m30s
+        exp_alerts:
+          - exp_labels: *regression-alpine-labels
+            exp_annotations: *regression-alpine-annotations

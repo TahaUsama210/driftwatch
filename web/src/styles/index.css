@@ -64,6 +64,9 @@
   --color-series-1: #2a78d6;
   --color-grid: #e1e0d9;
   --color-axis: #c3c2b7;
+
+  /* Behind modal dialogs. */
+  --color-scrim: rgb(11 11 11 / 0.45);
 }
 
 @layer base {
@@ -102,6 +105,7 @@
       --color-series-1: #3987e5;
       --color-grid: #2c2c2a;
       --color-axis: #383835;
+      --color-scrim: rgb(0 0 0 / 0.65);
     }
   }
 

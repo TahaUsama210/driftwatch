@@ -1,0 +1,2 @@
+{{- /* Renders nothing; fails the install on value combinations the schema cannot express. */ -}}
+{{- include "driftwatch.validate" . -}}

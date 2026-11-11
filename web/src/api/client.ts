@@ -1,17 +1,55 @@
 import createClient from 'openapi-fetch';
+import type { ApiAuth } from '../auth/types';
 import type { paths } from './schema';
 import type { Problem } from './types';
 
+let apiAuth: ApiAuth | undefined;
+
+/** Registers where API calls get their access token. Called once at startup (and by tests). */
+export function configureApiAuth(auth: ApiAuth | undefined): void {
+  apiAuth = auth;
+}
+
+function withBearer(request: Request, token: string | undefined): Request {
+  const authed = request.clone();
+  // The token is only ever sent to this origin, whatever URL a caller constructs.
+  if (token && new URL(request.url).origin === globalThis.location.origin) {
+    authed.headers.set('Authorization', `Bearer ${token}`);
+  }
+  return authed;
+}
+
 /**
- * Typed client for the Driftwatch API. Requests are same-origin: the Vite dev server
- * and the production nginx both proxy `/api` to the API, so no CORS is involved.
+ * Sends `request` with the current access token. On 401 (token revoked, Keycloak
+ * restarted, clock skew) it renews once and replays the request; if the API still
+ * refuses, it asks for an interactive re-authentication and returns the 401.
  *
  * `fetch` is looked up per request rather than captured once, so anything that wraps
  * the global after this module loads (MSW in tests, instrumentation) is honoured.
  */
+async function authorizedFetch(request: Request): Promise<Response> {
+  const auth = apiAuth;
+  if (!auth) return globalThis.fetch(request);
+
+  const response = await globalThis.fetch(withBearer(request, await auth.getAccessToken()));
+  if (response.status !== 401) return response;
+
+  const renewed = await auth.renewAccessToken();
+  if (renewed !== undefined) {
+    const retried = await globalThis.fetch(withBearer(request, renewed));
+    if (retried.status !== 401) return retried;
+  }
+  auth.reauthenticate();
+  return response;
+}
+
+/**
+ * Typed client for the Driftwatch API. Requests are same-origin: the Vite dev server
+ * and the production nginx both proxy `/api` to the API, so no CORS is involved.
+ */
 export const api = createClient<paths>({
   baseUrl: globalThis.location.origin,
-  fetch: (request) => globalThis.fetch(request),
+  fetch: authorizedFetch,
 });
 
 type ErrorKind = 'http' | 'network' | 'invalid-response';
@@ -126,6 +164,18 @@ export async function unwrap<T>(call: Promise<ClientResult<T>>): Promise<T> {
   if (!response.ok) throw ApiError.fromResponse(response, error);
   if (data === undefined) throw ApiError.invalidResponse(new Error('Empty response body'));
   return data;
+}
+
+/** Like {@link unwrap}, for endpoints that answer 204 No Content. */
+export async function unwrapEmpty(call: Promise<ClientResult<unknown>>): Promise<void> {
+  let result: ClientResult<unknown>;
+  try {
+    result = await call;
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    throw ApiError.network(error);
+  }
+  if (!result.response.ok) throw ApiError.fromResponse(result.response, result.error);
 }
 
 /** Problem details for any thrown value, for display in error states. */

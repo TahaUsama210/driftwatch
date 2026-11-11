@@ -1,0 +1,32 @@
+suite: Keycloak realm
+templates:
+  - keycloak/configmap.yaml
+release:
+  name: driftwatch
+  namespace: driftwatch
+tests:
+  - it: leaves the realm's redirect URIs alone when publicUrl is already listed (k3d)
+    asserts:
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"http://localhost:38080/\*"'
+      - notMatchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: 'localhost:38080/\*##http://localhost:38080/\*'
+
+  - it: adds publicUrl to the dashboard client's redirect and post-logout URIs
+    set:
+      publicUrl: http://203.0.113.10
+    asserts:
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"redirectUris": \[[^\]]*"http://203\.0\.113\.10/\*"'
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"post\.logout\.redirect\.uris": "[^"]*##http://203\.0\.113\.10/\*"'
+
+  - it: keeps numbers as integers, which Keycloak's import requires
+    asserts:
+      - matchRegex:
+          path: data["driftwatch-realm.json"]
+          pattern: '"accessTokenLifespan": 300,'

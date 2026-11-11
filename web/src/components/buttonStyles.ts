@@ -1,11 +1,14 @@
 import { cx } from '../lib/cx';
 
-type Variant = 'secondary' | 'ghost';
+type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 type Size = 'sm' | 'md';
 
 const VARIANTS: Record<Variant, string> = {
+  // Brand blue and the critical red are fixed across themes, with >= 4.5:1 white text.
+  primary: 'bg-brand text-on-brand hover:bg-brand/90',
   secondary: 'border border-border-strong/60 bg-surface text-ink hover:bg-sunken',
   ghost: 'text-ink-secondary hover:bg-sunken hover:text-ink',
+  danger: 'bg-critical text-on-brand hover:bg-critical/90',
 };
 
 const SIZES: Record<Size, string> = {

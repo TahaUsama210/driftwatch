@@ -14,12 +14,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Tool versions not managed by Dependabot; keep in sync with the Makefile.
+# Tool versions not managed by Dependabot; keep in sync with the Makefile. The
+# Terraform, Helm, Trivy and Prometheus tool images are pinned in scripts/lib/tools.sh.
 env:
   REDOCLY_CLI_VERSION: 2.65.1
   GOLANGCI_LINT_VERSION: v2.15.0
   ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
   SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  K3D_VERSION: v5.9.0
+  HELM_VERSION: v4.3.0
 
 defaults:
   run:
@@ -27,9 +30,9 @@ defaults:
 
 jobs:
   config:
-    name: Config (workflows, scripts, compose)
+    name: Config (workflows, scripts, compose, Dockerfiles)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,9 +40,17 @@ jobs:
       - name: actionlint
         run: docker run --rm --volume "$PWD:/repo" --workdir /repo "$ACTIONLINT_IMAGE" -color
       - name: shellcheck
-        run: docker run --rm --volume "$PWD:/mnt" "$SHELLCHECK_IMAGE" scripts/*.sh
-      - name: Compose file is valid
-        run: docker compose config --quiet
+        run: docker run --rm --volume "$PWD:/mnt" "$SHELLCHECK_IMAGE" scripts/*.sh scripts/lib/*.sh deploy/k3d/*.sh
+      - name: Compose file is valid, with and without the observability profile
+        run: |
+          docker compose config --quiet
+          docker compose --profile observability config --quiet
+      # Every Dockerfile, scanned from the repository root so the scoped exceptions in
+      # .trivyignore.yaml match. Image vulnerabilities are scanned in images.yml.
+      - name: Dockerfile misconfigurations (Trivy)
+        run: >-
+          bash scripts/trivy.sh config --exit-code 1 --severity HIGH,CRITICAL
+          --misconfig-scanners dockerfile --skip-dirs web/node_modules --skip-dirs '**/.terraform' .
 
   contract:
     name: Contract (OpenAPI lint)
@@ -107,6 +118,20 @@ jobs:
           java-version: 25
           cache: maven
           cache-dependency-path: api/pom.xml
+      # Testcontainers gives a pull about two minutes; registries (quay.io in particular)
+      # have outages longer than that. Pull up front with retries, so a registry blip
+      # retries instead of failing the suite.
+      - name: Pull the test containers' images
+        working-directory: .
+        run: |
+          for image in postgres:18.4-alpine quay.io/keycloak/keycloak:26.8.1; do
+            for attempt in 1 2 3 4 5; do
+              docker pull --quiet "$image" && break
+              [[ $attempt == 5 ]] && exit 1
+              echo "::warning::pulling $image failed (attempt $attempt); retrying in $((attempt * 20))s"
+              sleep $((attempt * 20))
+            done
+          done
       # Formatting check, unit tests, Testcontainers integration tests and JaCoCo.
       - name: Verify
         run: ./mvnw -B verify
@@ -163,6 +188,7 @@ jobs:
         run: npm run build
 
   images:
+    # The api, web and agent images are built, scanned and published by images.yml.
     name: Image (${{ matrix.image }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -170,15 +196,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: agent
-            context: agent
-            dockerfile: agent/Dockerfile
-          - image: api
-            context: api
-            dockerfile: api/Dockerfile
-          - image: web
-            context: web
-            dockerfile: web/Dockerfile
           # Simulated hosts build the agent from source, so their context is the repo root.
           - image: host-ubuntu-hardened
             context: .
@@ -197,7 +214,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # Phase 1 only proves every image builds; nothing is pushed.
+      # Demo-only images: CI proves they build; they are never published.
       - name: Build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -208,24 +225,96 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
-  e2e:
-    name: End-to-end (compose smoke test)
-    needs: [config, contract, agent, api, web, images]
+  terraform:
+    name: Terraform (fmt, validate, test, tflint, Trivy)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Terraform 1.16.7 and tflint run from pinned images; plan and apply never run.
+      - name: Check
+        run: bash scripts/check-terraform.sh
+        env:
+          # Read-only use: tflint downloads its pinned ruleset from GitHub releases.
+          GITHUB_TOKEN: ${{ github.token }}
+
+  helm:
+    name: Helm (lint, unittest, kubeconform, Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check
+        run: bash scripts/check-helm.sh
+
+  observability:
+    name: Observability (promtool, amtool, dashboards)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check
+        run: bash scripts/check-observability.sh
+
+  e2e:
+    name: End-to-end (compose smoke + browser tests)
+    needs: [config, contract, agent, api, web, images, observability]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       # Faster scans and drift than the local demo defaults, so the run stays short.
       DRIFTWATCH_INTERVAL: 10s
       DRIFT_PERIOD: 20
       SMOKE_TIMEOUT: 240
+      # The observability profile is included so the stack proves the included compose
+      # file starts healthy alongside the core services.
+      COMPOSE_PROFILES: observability
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Start stack
         run: docker compose up --detach --build --wait --wait-timeout 300
+      # Auth included: Keycloak tokens through the dashboard origin, 401/403 paths, and an
+      # admin decommission of a throwaway host the test enrolls itself.
       - name: Smoke test
         run: bash scripts/smoke.sh
+      - name: Prometheus scrapes the API
+        run: |
+          curl --silent --show-error --fail --max-time 10 \
+            'http://localhost:39090/api/v1/query?query=up%7Bjob%3D%22driftwatch-api%22%7D' \
+            | jq -e '.data.result | length > 0 and all(.value[1] == "1")'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Install browser tests
+        working-directory: e2e
+        run: |
+          npm ci
+          npm run typecheck
+          npx playwright install --with-deps chromium
+      # Real Keycloak login form for the demo viewer and admin, role-gated UI, silent
+      # session restore, sign-out, and a decommission of a host the test enrolls itself.
+      - name: Browser tests
+        working-directory: e2e
+        run: npm test
+      - name: Upload Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
       - name: Dump service state and logs
         if: ${{ failure() }}
         run: |
@@ -234,3 +323,82 @@ jobs:
       - name: Tear down
         if: ${{ always() }}
         run: docker compose down --volumes --remove-orphans
+
+  k8s-e2e:
+    name: End-to-end (k3d + Helm smoke + browser tests)
+    needs: [helm, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install k3d
+        run: |
+          base="https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}"
+          curl --silent --show-error --fail --location --remote-name "${base}/k3d-linux-amd64"
+          # checksums.txt names the build path (`_dist/k3d-linux-amd64`), so match the
+          # basename and check the downloaded file against that hash.
+          expected="$(curl --silent --show-error --fail --location "${base}/checksums.txt" \
+            | awk '$2 ~ /(^|\/)k3d-linux-amd64$/ { print $1 }')"
+          if [[ ! $expected =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::checksums.txt has no single sha256 for k3d-linux-amd64"
+            exit 1
+          fi
+          echo "${expected}  k3d-linux-amd64" | sha256sum --check --strict
+          sudo install --mode 0755 k3d-linux-amd64 /usr/local/bin/k3d
+          rm k3d-linux-amd64
+          k3d version
+      - name: Create cluster, build and import images, install both charts
+        run: bash deploy/k3d/up.sh
+      - name: Smoke test
+        run: bash deploy/k3d/smoke.sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      # The same browser suite as the compose job, through the k3d ingress. The hosts the
+      # viewer must see are the cluster's nodes, each scanned by the agent DaemonSet.
+      - name: Browser tests
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          export KUBECONFIG
+          KUBECONFIG="$(k3d kubeconfig write driftwatch)"
+          token="$(kubectl get secret --namespace driftwatch-agent driftwatch-enrollment \
+            --output jsonpath='{.data.enrollment-token}' | base64 --decode)"
+          echo "::add-mask::${token}"
+          DRIFTWATCH_ENROLLMENT_TOKEN="${token}" \
+          E2E_EXPECT_HOSTS="$(kubectl get nodes --output jsonpath='{.items[*].metadata.name}' | tr ' ' ',')" \
+          WEB_URL=http://localhost:38080 \
+            npm test
+      - name: Upload Playwright report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report-k3d
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+      - name: Dump cluster state
+        if: ${{ failure() }}
+        run: |
+          # The k3d scripts keep the cluster's kubeconfig out of the default one.
+          export KUBECONFIG
+          KUBECONFIG="$(k3d kubeconfig write driftwatch)"
+          kubectl get pods,svc,ingress,networkpolicy --all-namespaces -o wide
+          kubectl get events --all-namespaces --sort-by=.lastTimestamp | tail -n 100
+          # Best effort: a diagnostics step must not hide the failure that triggered it.
+          for ns in $(kubectl get namespaces -o name | grep driftwatch | cut -d/ -f2); do
+            kubectl logs --namespace "$ns" --all-containers --prefix --tail=200 \
+              --selector 'app.kubernetes.io/name' || true
+          done
+      - name: Tear down
+        if: ${{ always() }}
+        run: bash deploy/k3d/down.sh

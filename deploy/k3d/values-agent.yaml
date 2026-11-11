@@ -1,0 +1,19 @@
+# Node agents on the local k3d cluster: one per node, scanning every 30s like the
+# compose demo hosts. up.sh copies the control plane's enrollment token into this
+# Secret, so the token never appears in values or on a command line.
+image:
+  registry: ""
+  repository: driftwatch-agent
+  tag: dev  # overridden by up.sh with a content-derived dev-<image id> tag
+  pullPolicy: Never
+
+serverUrl: http://driftwatch-api.driftwatch.svc.cluster.local:8080
+
+enrollment:
+  existingSecret: driftwatch-enrollment
+  existingSecretKey: enrollment-token
+
+interval: 30s
+
+# k3s node images are minimal: no /usr/lib, and /etc/os-release is a regular file.
+mountUsrLib: false

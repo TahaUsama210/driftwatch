@@ -1,0 +1,32 @@
+suite: agent NetworkPolicy
+templates:
+  - networkpolicy.yaml
+release:
+  name: driftwatch-agent
+  namespace: driftwatch-agent
+set:
+  enrollment.token: test-enrollment-token-0123456789
+tests:
+  - it: denies all ingress and allows egress to the API and DNS only
+    asserts:
+      - equal: { path: spec.ingress, value: [] }
+      - equal: { path: spec.policyTypes, value: [Ingress, Egress] }
+      - lengthEqual: { path: spec.egress, count: 2 }
+      - equal:
+          path: spec.egress[1]
+          value:
+            to:
+              - namespaceSelector:
+                  matchLabels: { kubernetes.io/metadata.name: driftwatch }
+                podSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: driftwatch
+                    app.kubernetes.io/component: api
+            ports:
+              - { port: 8080, protocol: TCP }
+
+  - it: is not rendered for a hostNetwork agent, which policies cannot select
+    set:
+      hostNetwork: true
+    asserts:
+      - hasDocuments: { count: 0 }

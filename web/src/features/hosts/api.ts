@@ -1,5 +1,5 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { api, unwrap } from '../../api/client';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
+import { api, unwrap, unwrapEmpty } from '../../api/client';
 import { queryKeys } from '../../api/queryKeys';
 import type { HostListQuery } from '../../api/types';
 import { LIVE_REFRESH_MS } from '../../lib/config';
@@ -74,5 +74,16 @@ export function useHostDrift(hostId: string, range: { from?: string; to?: string
       ),
     refetchInterval: range.to === undefined ? LIVE_REFRESH_MS : false,
     placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * Deletes a host with its scans, results and drift events (admin only). Cache updates
+ * are left to the caller, which has to leave the host's page before its queries go.
+ */
+export function useDecommissionHost() {
+  return useMutation({
+    mutationFn: (hostId: string) =>
+      unwrapEmpty(api.DELETE('/api/v1/hosts/{hostId}', { params: { path: { hostId } } })),
   });
 }

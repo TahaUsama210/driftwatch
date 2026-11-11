@@ -1,0 +1,185 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy -}}
+{{- $web := dict "ctx" . "component" "web" -}}
+{{- $api := dict "ctx" . "component" "api" -}}
+{{- $keycloak := dict "ctx" . "component" "keycloak" -}}
+{{- $postgresql := dict "ctx" . "component" "postgresql" -}}
+{{- $serviceMonitor := and .Values.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") -}}
+# Every pod in the release starts with no ingress and no egress. The policies below
+# each open exactly one component's traffic; NetworkPolicies are additive.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "driftwatch.componentName" (dict "ctx" . "component" "default-deny") }}
+  labels:
+    {{- include "driftwatch.labels" (dict "ctx" . "component" "") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" (dict "ctx" . "component" "") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# web: the ingress controller in; the API and Keycloak (its proxy upstreams) and DNS out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "driftwatch.componentName" $web }}
+  labels:
+    {{- include "driftwatch.labels" $web | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $web | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- toYaml $np.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.ingressController.podSelector | nindent 12 }}
+      ports:
+        - port: http
+          protocol: TCP
+  egress:
+    {{- include "driftwatch.dnsEgress" . | nindent 4 }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $api | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- if .Values.keycloak.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $keycloak | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- end }}
+    {{- with $np.web.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# api: the dashboard proxy and the agents in (plus Prometheus when a ServiceMonitor
+# is rendered); the database, Keycloak's JWKS endpoint and DNS out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "driftwatch.componentName" $api }}
+  labels:
+    {{- include "driftwatch.labels" $api | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $api | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $web | nindent 14 }}
+        - namespaceSelector:
+            {{- toYaml $np.agents.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $np.agents.podSelector | nindent 12 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- if and $serviceMonitor $np.metricsFrom }}
+    - from:
+        {{- toYaml $np.metricsFrom | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+    {{- with $np.api.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    {{- include "driftwatch.dnsEgress" . | nindent 4 }}
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $postgresql | nindent 14 }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    {{- end }}
+    {{- if .Values.keycloak.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $keycloak | nindent 14 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- end }}
+    {{- with $np.api.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.keycloak.enabled }}
+---
+# keycloak: the dashboard proxy (browser traffic) and the API (JWKS) in. Dev mode
+# needs nothing outbound, not even DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "driftwatch.componentName" $keycloak }}
+  labels:
+    {{- include "driftwatch.labels" $keycloak | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $keycloak | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $web | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $api | nindent 14 }}
+      ports:
+        - port: http
+          protocol: TCP
+  egress: []
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+---
+# postgresql: the API in; nothing out.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "driftwatch.componentName" $postgresql }}
+  labels:
+    {{- include "driftwatch.labels" $postgresql | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "driftwatch.selectorLabels" $postgresql | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "driftwatch.selectorLabels" $api | nindent 14 }}
+      ports:
+        - port: postgresql
+          protocol: TCP
+  egress: []
+{{- end }}
+{{- end }}

@@ -1,0 +1,238 @@
+# Driftwatch control plane. Every key is described in ../README.md and validated by
+# values.schema.json. The defaults target the local k3d cluster (deploy/k3d); the
+# README's "Production notes" lists what to change for a real cluster.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Public base URL of the dashboard: scheme://host[:port], no path, no trailing slash.
+# The SPA, Keycloak (under /auth) and the API share this one origin, and it fixes the
+# OIDC issuer (<publicUrl>/auth/realms/driftwatch) whatever address Keycloak is reached on.
+publicUrl: http://localhost:38080
+
+imagePullSecrets: []
+
+serviceAccount:
+  # One ServiceAccount for every pod in the release. No pod talks to the Kubernetes
+  # API, so its token is never mounted and it is bound to no Role.
+  create: true
+  name: ""
+  annotations: {}
+
+# Shared secret agents present to POST /api/v1/agents/enroll.
+enrollment:
+  # At least 24 characters. Leave empty to generate a random 48-character token on
+  # first install; upgrades keep the stored value.
+  token: ""
+  # Use an existing Secret instead (the chart then creates none).
+  existingSecret: ""
+  existingSecretKey: enrollment-token
+
+oidc:
+  # Exact `iss` the API accepts. Empty means <publicUrl>/auth/realms/driftwatch, which
+  # is only meaningful with keycloak.enabled; set it when using an external IdP.
+  issuer: ""
+  # Where the API fetches signing keys. Empty means the in-cluster Keycloak Service
+  # (no hairpin through the ingress); set it when using an external IdP.
+  jwksUri: ""
+  audience: driftwatch-api
+  # Public client the SPA uses for Authorization Code + PKCE.
+  webClientId: driftwatch-web
+
+api:
+  replicaCount: 2
+  image:
+    registry: ghcr.io/tahausama210
+    repository: driftwatch-api
+    # Defaults to the chart's appVersion. A digest, when set, wins over the tag.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # ISO-8601 duration after which a silent host is STALE.
+  staleAfter: PT5M
+  # Extra environment variables, as a list of EnvVar objects.
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+web:
+  replicaCount: 2
+  image:
+    registry: ghcr.io/tahausama210
+    repository: driftwatch-web
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # nginx resolves its upstreams per request with this resolver, so it needs a
+  # DNS server address rather than the pod's resolv.conf. The name is resolved
+  # once at nginx startup.
+  dnsResolver: kube-dns.kube-system.svc.cluster.local
+  # Where nginx proxies /auth/. Empty means the in-cluster Keycloak Service; set it
+  # when keycloak.enabled is false and the IdP should still be served under /auth.
+  keycloakUpstream: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+keycloak:
+  # Keycloak in dev mode (start-dev, embedded H2, realm re-imported on every start).
+  # For local clusters only: state is lost when the pod restarts and it runs one
+  # replica. Production uses an external IdP or the Keycloak Operator; see the README.
+  enabled: true
+  image:
+    registry: quay.io
+    repository: keycloak/keycloak
+    tag: 26.8.1
+    digest: ""
+    pullPolicy: IfNotPresent
+  # Temporary master-realm admin created at startup.
+  admin:
+    username: admin
+    # Leave empty to generate one; upgrades keep the stored value.
+    password: ""
+    existingSecret: ""
+    existingSecretKey: admin-password
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+postgresql:
+  # A single-instance Postgres StatefulSet. Set to false and fill in
+  # externalDatabase to use a managed database instead.
+  enabled: true
+  image:
+    registry: docker.io
+    repository: library/postgres
+    tag: 18.6-alpine
+    digest: ""
+    pullPolicy: IfNotPresent
+  auth:
+    username: driftwatch
+    database: driftwatch
+    # Leave empty to generate one; upgrades keep the stored value, and the Secret
+    # survives `helm uninstall` (like the data volume) so a reinstall can still log in.
+    password: ""
+    existingSecret: ""
+    existingSecretKey: password
+  persistence:
+    # Empty uses the cluster's default StorageClass (local-path on k3s).
+    storageClass: ""
+    size: 2Gi
+    accessModes:
+      - ReadWriteOnce
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Used when postgresql.enabled is false. host and existingSecret are then required.
+externalDatabase:
+  host: ""
+  port: 5432
+  database: driftwatch
+  username: driftwatch
+  existingSecret: ""
+  existingSecretKey: password
+  # Appended to the JDBC URL after "?", e.g. "sslmode=verify-full".
+  jdbcParameters: ""
+
+ingress:
+  enabled: true
+  className: traefik
+  # Empty matches every host, which suits localhost. Set it for a real domain.
+  host: ""
+  annotations: {}
+  # Standard Ingress TLS entries, e.g. [{secretName: driftwatch-tls, hosts: [driftwatch.example.com]}].
+  tls: []
+
+metrics:
+  serviceMonitor:
+    # Rendered only when the cluster also serves monitoring.coreos.com/v1
+    # (the Prometheus Operator CRDs), so enabling it never breaks an install.
+    enabled: false
+    interval: 15s
+    scrapeTimeout: 10s
+    labels: {}
+
+networkPolicy:
+  # Default-deny for every pod in the release, plus the allows below. Keep this on:
+  # the chart's security posture assumes it.
+  enabled: true
+  # Where cluster DNS runs. Pods may reach it on port 53 (UDP and TCP) only.
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  # The ingress controller's pods, the only allowed client of the dashboard.
+  ingressController:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: traefik
+  # Agent pods (the driftwatch-agent chart) allowed to call the API.
+  agents:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: driftwatch-agent
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: driftwatch-agent
+  # Peers allowed to scrape /actuator/prometheus (NetworkPolicyPeer objects).
+  # Only applied when the ServiceMonitor is rendered.
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+  # Extra API ingress and egress rules (NetworkPolicyIngressRule / EgressRule objects),
+  # e.g. egress to an external database or IdP, or ingress from agents outside the
+  # cluster network.
+  api:
+    extraIngress: []
+    extraEgress: []
+  # Extra dashboard egress rules (NetworkPolicyEgressRule objects). Needed when
+  # web.keycloakUpstream points nginx's /auth/ proxy at an IdP outside the release.
+  web:
+    extraEgress: []

@@ -5,7 +5,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.MockMvcBuilderCustomiz
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 
-/** Beans that {@link IntegrationTest} adds to the application context. */
+/** Beans that {@link ApplicationTest} adds to the application context. */
 @TestConfiguration(proxyBeanMethods = false)
 class IntegrationTestConfiguration {
 
@@ -13,7 +13,7 @@ class IntegrationTestConfiguration {
     @Bean
     @Primary
     MutableClock testClock() {
-        return new MutableClock(IntegrationTest.NOW);
+        return new MutableClock(ApplicationTest.NOW);
     }
 
     /** Validates every MockMvc response of every integration test against the OpenAPI contract. */

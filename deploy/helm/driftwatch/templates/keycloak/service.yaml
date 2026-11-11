@@ -1,0 +1,20 @@
+{{- if .Values.keycloak.enabled }}
+{{- $component := dict "ctx" . "component" "keycloak" -}}
+# HTTP only. The management port (health, metrics) is reached by the kubelet's
+# probes on the pod IP and is deliberately not exposed through the Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "driftwatch.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+{{- end }}

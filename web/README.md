@@ -14,7 +14,8 @@ drift directions) come from [`docs/CONTRACTS.md`](../docs/CONTRACTS.md).
 | Events      | `/events`                     | Drift events filtered by direction (and by host via `?hostId=`)                                       |
 
 With no enrolled hosts, the overview and hosts pages explain how to run the agent.
-Unknown routes, hosts and checks get a not-found page inside the app shell.
+Unknown routes, hosts and checks get a not-found page inside the app shell. Everything
+is behind sign-in (OIDC with Keycloak); admins can also decommission a host.
 
 ## Requirements
 
@@ -25,19 +26,19 @@ later with an obscure one.
 
 ## Scripts
 
-| Script               | What it does                                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `npm run dev`        | Dev server on <http://localhost:5180>, proxying `/api` and `/actuator` to the API on `http://localhost:8480`       |
-| `npm run dev:mock`   | Same dev server, with the API served in the browser by MSW (no backend needed)                                     |
-| `npm run build`      | Type-check (`tsc -b`), then production build into `dist/`                                                          |
-| `npm run preview`    | Serve `dist/` on port 5181 with the same API proxy                                                                 |
-| `npm run lint`       | ESLint (zero warnings allowed), then `prettier --check`                                                            |
-| `npm run typecheck`  | `tsc -b` over app and tooling configs                                                                              |
-| `npm test`           | Vitest, single run                                                                                                 |
-| `npm run test:watch` | Vitest in watch mode                                                                                               |
-| `npm run coverage`   | Vitest with V8 coverage (text + HTML + lcov in `coverage/`); fails below the thresholds in `vite.config.ts`        |
-| `npm run gen:api`    | Regenerate `src/api/schema.d.ts` from `../contracts/openapi.yaml` (the file is committed; CI fails if it is stale) |
-| `npm run format`     | Prettier, write mode                                                                                               |
+| Script               | What it does                                                                                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`        | Dev server on <http://localhost:5180>, proxying `/api` and `/actuator` to `http://localhost:8480`; signs in against the compose Keycloak |
+| `npm run dev:mock`   | Same dev server, with the API served in the browser by MSW (no backend needed)                                                           |
+| `npm run build`      | Type-check (`tsc -b`), then production build into `dist/`                                                                                |
+| `npm run preview`    | Serve `dist/` on port 5181 with the same API proxy                                                                                       |
+| `npm run lint`       | ESLint (zero warnings allowed), then `prettier --check`                                                                                  |
+| `npm run typecheck`  | `tsc -b` over app and tooling configs                                                                                                    |
+| `npm test`           | Vitest, single run                                                                                                                       |
+| `npm run test:watch` | Vitest in watch mode                                                                                                                     |
+| `npm run coverage`   | Vitest with V8 coverage (text + HTML + lcov in `coverage/`); fails below the thresholds in `vite.config.ts`                              |
+| `npm run gen:api`    | Regenerate `src/api/schema.d.ts` from `../contracts/openapi.yaml` (the file is committed; CI fails if it is stale)                       |
+| `npm run format`     | Prettier, write mode                                                                                                                     |
 
 ## Mock mode
 
@@ -60,15 +61,80 @@ Append a scenario to the first URL you open:
 - `?scenario=empty`: no hosts enrolled (shows the enrollment instructions)
 - `?scenario=error`: every API call returns `503` problem details (shows error states)
 
+Mock mode skips the identity provider and signs in a demo user. Pick the role on the
+first URL with `?role=admin` (the default), `?role=viewer` or `?role=none` (an account
+with no Driftwatch role, to see the "insufficient permissions" page), or switch between
+admin and viewer later in the user menu. The mock user's requests carry a fake bearer
+token (`mock.<roles>`) and the MSW handlers enforce the API's authorization matrix with
+it: no token is `401`, a viewer's `DELETE` is `403`. Tests run against the same handlers.
+Signing out shows the landing page; signing in again restores the demo user.
+
 The worker script is served from `node_modules/msw` by a small Vite plugin in mock mode
 only, so it always matches the installed MSW version and never ships in `dist/`.
+
+## Authentication
+
+Dashboard login is OpenID Connect Authorization Code with PKCE (S256), implemented with
+`oidc-client-ts` against the `driftwatch` Keycloak realm (public client
+`driftwatch-web`). Keycloak is served under `/auth` on the dashboard's own origin, so
+the SPA, the identity provider and the API share one origin: no CORS, and the silent
+sign-in iframe needs no third-party cookies.
+
+1. **Startup.** The app fetches `GET /config.json` (`{"oidc":{"authority","clientId"}}`).
+   If that fails it shows a configuration error with a retry, and never guesses.
+2. **Session restore.** It tries a silent `prompt=none` sign-in in a hidden iframe that
+   lands on `/silent-renew.html`. A live Keycloak session signs the user straight in;
+   otherwise the signed-out landing appears. Sign-in only ever starts from the **Sign in**
+   button, so a broken identity provider cannot cause a redirect loop.
+3. **Sign-in.** The browser goes to Keycloak and returns to `/signin-callback`; the code
+   is redeemed, removed from the address bar, and the user lands on the page they
+   started from (`state` carries a same-origin path only, so it is no open redirect).
+4. **Using the API.** Every request carries `Authorization: Bearer <access token>`,
+   attached only for this origin. Tokens last 300 s and are renewed a minute early with
+   the refresh token. If the API still answers `401` (session revoked, Keycloak
+   restarted), the client renews once and replays the request; if that fails too it
+   sends the user to sign in again, and returns to the same page. If the API rejects a
+   fresh session within 60 s of the last redirect, it stops and shows "Sign in again"
+   instead of looping. A `403` shows an "Insufficient permissions" state, and a user with
+   no Driftwatch role gets a full-page explanation instead of the app.
+5. **Roles.** The user menu shows the name and role (`realm_access.roles` from the access
+   token, where `admin` includes `viewer`). Admins see **Decommission host** on host pages:
+   a dialog explains what is deleted and asks for the hostname to be typed. Success
+   returns to the host list with a confirmation. The button is hidden for viewers, but
+   that is a convenience: the API checks the role on every request.
+6. **Sign-out** ends the Keycloak session (end-session endpoint with `id_token_hint`)
+   and comes back to the landing page. Each signed-in user gets a fresh query cache, so
+   no data carries over to the next account.
+
+**Token storage.** Access, refresh and ID tokens are kept **in memory only**. They are
+never in `localStorage` or `sessionStorage`. Script injected into the page (XSS) could
+read web storage in one line, and would find a refresh token there that stays valid for
+hours. In memory, nothing is at rest to scrape. This does not make XSS harmless: injected
+code could still make API calls as the user while the tab is open. The strict CSP (no
+inline script, same-origin only) is the defence against that. The cost of in-memory
+tokens is that a reload loses them. The silent iframe sign-in gets them back in one
+same-origin round trip while the Keycloak session lasts (30 min idle, 10 h max), so a
+reload does not ask for the password again. `sessionStorage` holds only the one-time
+PKCE verifier and `state` while the browser is at Keycloak, because they must survive
+that navigation. The library would put them in `localStorage`. They are deleted at the
+callback.
+
+**Local demo accounts** (from the realm import; for the localhost demo only):
+`viewer` / `viewer-demo` (read-only) and `admin` / `admin-demo` (can decommission).
+With `npm run dev`, sign in through the compose stack's Keycloak at
+`http://localhost:8400/auth/realms/driftwatch`. Port 5180 is a registered redirect URI
+and web origin, so the cross-origin dev setup works. `OIDC_AUTHORITY` and
+`OIDC_CLIENT_ID` in the environment override what the dev server puts in
+`/config.json`. `npm run preview` (5181) serves the same file, but 5181 is not a
+registered redirect URI.
 
 ## Structure
 
 ```
 src/
   api/          generated contract types, typed client, ApiError, query keys
-  app/          routes, app shell, theme toggle, query client defaults
+  app/          startup, routes, app shell, theme toggle, query client defaults
+  auth/         OIDC and mock auth controllers, auth gate, landing, user menu, roles
   components/   design-system pieces: badges, cards, fields, states, charts
   domain/       contract rules in one place: score tiers, statuses, severities, directions
   features/     one folder per screen, each with its data hooks (api.ts) and tests
@@ -127,28 +193,72 @@ one-second clock; the absolute timestamp (with time zone) is in the `title` and
 
 ## Container image
 
-`docker build -t driftwatch-web web` builds the app on `node:22.23.4-alpine3.24` and
-serves it from `nginxinc/nginx-unprivileged:1.30.6-alpine3.24` on port 8080 as uid 101.
-It needs no Linux capabilities.
+`docker build -t driftwatch-web web` builds the static app on `node:22.23.4-alpine3.24`.
+That stage is `FROM --platform=$BUILDPLATFORM`, because the output is the same for every
+architecture, so multi-arch builds compile once, natively. The app is served from
+`nginxinc/nginx-unprivileged:1.30.6-alpine3.24` on port 8080 as uid 101, with Alpine
+packages upgraded at build time so fixable CVEs are not shipped. It needs no Linux
+capabilities.
 
-| Variable       | Default           | Meaning                                                              |
-| -------------- | ----------------- | -------------------------------------------------------------------- |
-| `API_UPSTREAM` | `http://api:8080` | Where `/api/` and `/actuator/health` (and its sub-paths) are proxied |
-| `DNS_RESOLVER` | `127.0.0.11`      | Resolver for `API_UPSTREAM`; Docker's embedded DNS by default        |
+| Variable            | Default                                        | Meaning                                                              |
+| ------------------- | ---------------------------------------------- | -------------------------------------------------------------------- |
+| `API_UPSTREAM`      | `http://api:8080`                              | Where `/api/` and `/actuator/health` (and its sub-paths) are proxied |
+| `KEYCLOAK_UPSTREAM` | `http://keycloak:8080`                         | Where `/auth/` is proxied                                            |
+| `DNS_RESOLVER`      | `127.0.0.11`                                   | Resolver for the upstreams; Docker's embedded DNS by default         |
+| `OIDC_AUTHORITY`    | `http://localhost:8400/auth/realms/driftwatch` | Issuer written to `/config.json`                                     |
+| `OIDC_CLIENT_ID`    | `driftwatch-web`                               | Client ID written to `/config.json`                                  |
 
-The upstream is resolved per request, so the container starts before the API exists
-and follows it across restarts. If the API cannot be reached, `/api/` answers `502`
-with `application/problem+json`, so the dashboard shows a readable error. Every other
-path under `/actuator/` returns 404.
+These values are written into nginx's config and into a JSON body, so
+`/docker-entrypoint.d/15-driftwatch-check-env.sh` checks them before rendering:
+plain `scheme://host[:port]` upstreams, and an issuer URL and client ID with no quotes,
+spaces, `$` or newlines. Anything else stops the container with a message, rather than
+producing a broken or injectable config.
 
-Deep links such as `/hosts/<id>` receive `index.html`. Hashed files under `/assets/`
-are served with `Cache-Control: public, max-age=31536000, immutable` (not on 404s);
-`index.html` and other unhashed files get `no-cache`. Text responses over 1 KiB are
-gzip-compressed. Responses carry a Content-Security-Policy that allows only same-origin resources (no
-`unsafe-inline`), plus `frame-ancestors 'none'`, `X-Content-Type-Options`,
-`Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy` and
-`Cross-Origin-Opener-Policy`. `/healthz` is a local liveness endpoint used by the image
-`HEALTHCHECK`.
+Upstreams are resolved per request, so the container starts before the API or Keycloak
+exist and follows them across restarts. If either cannot be reached, `/api/` or
+`/auth/` answers `502` with `application/problem+json`.
+
+- `/config.json` is rendered from the environment at start and sent with
+  `Cache-Control: no-store`.
+- `/auth/` goes to Keycloak with `X-Forwarded-For/Proto/Host/Port`. Values an ingress
+  in front already set (Traefik in k3d) are kept; otherwise they describe the browser's
+  request. Proxy buffers are 16k because Keycloak's cookies are large, and so are client
+  header buffers. The SPA's security headers are **not** added to Keycloak's responses,
+  which carry their own. `/auth/admin` and `/auth/realms/master`, bare or with any path
+  below them, return 404: the admin console and the master realm are not published on
+  the dashboard's origin.
+- Deep links such as `/hosts/<id>` and `/signin-callback` receive `index.html`. Hashed
+  files under `/assets/` get `Cache-Control: public, max-age=31536000, immutable` (not
+  on 404s); `index.html` and other unhashed files get `no-cache`. Text responses over
+  1 KiB are gzip-compressed. `/healthz` is a local liveness endpoint used by the image
+  `HEALTHCHECK`.
+
+**Security headers** on the app's own responses: a Content-Security-Policy that allows
+only same-origin resources (no `unsafe-inline`), with `connect-src 'self'` for the
+discovery and token calls, `frame-src 'self'` for the silent sign-in iframe and
+`form-action 'self'`. Also `X-Content-Type-Options`, `Referrer-Policy`,
+`Permissions-Policy` and `Cross-Origin-Opener-Policy`. Framing is refused
+(`frame-ancestors 'none'`, `X-Frame-Options: DENY`) everywhere except
+`/silent-renew.html`, which only this origin may frame. An identity provider on another
+origin would need its origin added to `connect-src` and `frame-src`. The contract puts
+it on the same origin.
+
+**Read-only root filesystem.** nginx writes only to these two paths. Mount an
+`emptyDir` (Kubernetes) or tmpfs on each:
+
+| Path                | Written by                                                              |
+| ------------------- | ----------------------------------------------------------------------- |
+| `/tmp`              | nginx pid file and its client-body and proxy temp directories           |
+| `/etc/nginx/conf.d` | the entrypoint, which renders `default.conf` from the template at start |
+
+Both must be writable by uid 101. A Kubernetes `emptyDir` already is. With Docker, give
+the tmpfs that owner:
+
+```
+docker run --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp:uid=101,gid=101 --tmpfs /etc/nginx/conf.d:uid=101,gid=101 \
+  -p 127.0.0.1:8400:8080 driftwatch-web
+```
 
 ## Toolchain notes
 

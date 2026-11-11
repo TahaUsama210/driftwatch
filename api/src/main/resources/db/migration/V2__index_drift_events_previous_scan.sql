@@ -1,0 +1,14 @@
+-- Supports decommissioning a host (DELETE /api/v1/hosts/{hostId}), which deletes all of its scans.
+--
+-- For every deleted scans row Postgres checks each foreign key that references scans, whether or not
+-- matching rows are left. scan_results (primary key) and drift_events.scan_id (drift_events_scan_check_key)
+-- are already led by the referencing column; drift_events.previous_scan_id was not, so each deleted scan
+-- cost a sequential scan of the whole fleet's drift_events.
+--
+-- hosts.latest_scan_id, the other reference to scans, deliberately stays unindexed: ingest moves that
+-- pointer on every scan, and an index on it would make every one of those updates a non-HOT update.
+-- hosts holds one row per host, so the check it costs per deleted scan reads a handful of pages.
+--
+-- A plain CREATE INDEX blocks writes to drift_events while it builds, briefly at this table's size. On
+-- a large production table this would be CREATE INDEX CONCURRENTLY, outside a transaction.
+CREATE INDEX drift_events_previous_scan_idx ON drift_events (previous_scan_id);

@@ -6,7 +6,9 @@ stores scan history, computes a compliance score per host, and records **drift**
 check that changed status between two consecutive scans). A React dashboard shows
 fleet posture, per-host score over time, and what changed.
 
-This file is the single source of truth that every component is built against.
+This file is the single source of truth that every component is built against. Phase 2
+(identity, observability, Kubernetes, Terraform, supply chain) is specified in
+[Phase 2](#phase-2) at the end; where it changes a phase 1 rule, phase 2 wins.
 `contracts/openapi.yaml` is the machine-readable HTTP contract. If the two disagree,
 `openapi.yaml` wins for HTTP shapes; this file wins for everything else.
 
@@ -152,8 +154,8 @@ Same status with different evidence is **not** drift.
    On `401` the agent discards its token and re-enrolls once.
 4. The API stores only the SHA-256 hash of agent tokens and compares secrets in constant
    time. Agent tokens are 32 random bytes, base64url without padding, prefixed `dwa_`.
-5. Read endpoints (`GET /api/v1/**`) are unauthenticated in phase 1 — documented as a
-   known tradeoff; phase 2 adds dashboard auth.
+5. Read endpoints (`GET /api/v1/**`) and decommission need a dashboard JWT (phase 2; see
+   "Identity" below). They were unauthenticated in phase 1.
 
 ### Idempotency
 
@@ -271,3 +273,303 @@ a senior engineer would on a production team:
 - Structured logging; no secrets in logs (never log tokens).
 - Clear error handling; no swallowed errors.
 - Every claim in a README or comment must be true of the code. No invented numbers.
+
+---
+
+## Phase 2
+
+Phase 2 adds dashboard login (OIDC), per-host metrics with alerting, a Kubernetes
+deployment, an AWS test fleet in Terraform, and a signed, scanned image supply chain.
+
+### Phase 2 ownership
+
+| Path | Owner |
+|---|---|
+| `contracts/**`, `docs/**`, `README.md`, `deploy/helm/driftwatch/files/keycloak/driftwatch-realm.json` | lead |
+| `api/**` | api team |
+| `web/**` | web team |
+| `deploy/observability/**` | observability team |
+| `deploy/helm/**` (except the realm file), `deploy/k3d/**` | kubernetes team |
+| `infra/terraform/**` | terraform team |
+| `docker-compose.yml`, `.github/**`, `Makefile`, `scripts/**`, `.env.example`, root dotfiles, `agent/Dockerfile` | platform team |
+
+The phase 1 rules still apply: never edit outside your paths, never commit/push/branch/tag,
+never touch Docker resources not prefixed `driftwatch` (or k3d clusters not named
+`driftwatch`), and list proposed contract changes in your final report.
+
+### Phase 2 ports (host side, all bound to 127.0.0.1)
+
+| What | Port |
+|---|---|
+| Keycloak | none: reached through the web nginx at `/auth` (same origin as the dashboard) |
+| Prometheus | 39090 |
+| Alertmanager | 39093 |
+| Grafana | 33000 |
+| k3d ingress (Traefik load balancer) | 38080 |
+| k3d Kubernetes API | 36443 |
+
+### Identity (OIDC with Keycloak)
+
+- Keycloak `quay.io/keycloak/keycloak:26.8.1`. The realm is imported from
+  `deploy/helm/driftwatch/files/keycloak/driftwatch-realm.json`, the single source for both
+  compose (mounted read-only) and Helm (`.Files.Get`). The lead has verified that it
+  imports and issues the tokens described here.
+- Keycloak runs under the path `/auth` behind the web nginx, so the SPA, the IdP and the
+  API share one origin (no CORS; silent renew in an iframe works). Keycloak settings:
+  `KC_HTTP_RELATIVE_PATH=/auth`, `KC_HOSTNAME=<public base>/auth`,
+  `KC_PROXY_HEADERS=xforwarded`, `KC_HTTP_ENABLED=true`, `KC_HEALTH_ENABLED=true`
+  (management port 9000, readiness at `:9000/auth/health/ready`). The demo runs
+  `start-dev --import-realm` (embedded H2): local use only, and the docs must say so.
+- **Public base URL** per environment: compose `http://localhost:8400`, k3d
+  `http://localhost:38080`, Vite dev server `http://localhost:5180` (which uses compose's
+  Keycloak at the 8400 issuer).
+- **Issuer** = `<public base>/auth/realms/driftwatch`. Because `KC_HOSTNAME` is fixed,
+  tokens carry this issuer however Keycloak was reached.
+
+| Realm object | Details |
+|---|---|
+| role `viewer` | read everything |
+| role `admin` | composite: includes `viewer`, plus decommission hosts |
+| client `driftwatch-web` | public, Authorization Code + PKCE S256 only, redirect URIs on ports 8400/5180/38080 |
+| client `driftwatch-smoke-viewer` | confidential, client credentials only, secret `smoke-viewer-demo-secret`, role `viewer` |
+| client `driftwatch-smoke-admin` | confidential, client credentials only, secret `smoke-admin-demo-secret`, roles `viewer` + `admin` |
+| user `viewer` / password `viewer-demo` | role `viewer` |
+| user `admin` / password `admin-demo` | role `admin` |
+
+All clients have `fullScopeAllowed: false` with explicit scope mappings. Access tokens
+last 300 s, carry roles in `realm_access.roles`, and have `aud` containing
+`driftwatch-api`. The demo secrets and passwords are for the localhost-bound demo only.
+
+**API configuration** (new env vars):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DRIFTWATCH_OIDC_ISSUER` | none, required | exact `iss` value to accept |
+| `DRIFTWATCH_OIDC_JWKS_URI` | `${DRIFTWATCH_OIDC_ISSUER}/protocol/openid-connect/certs` | where to fetch signing keys; compose and k8s point it at the internal Keycloak service |
+| `DRIFTWATCH_OIDC_AUDIENCE` | `driftwatch-api` | required `aud` entry |
+
+The API must start and pass readiness while Keycloak is down: keys are fetched lazily
+and cached. Readiness does not depend on Keycloak.
+
+**Authorization matrix**
+
+| Endpoint | Credential | Role |
+|---|---|---|
+| `GET /api/v1/**` | dashboard JWT | `viewer` |
+| `DELETE /api/v1/hosts/{hostId}` | dashboard JWT | `admin` |
+| `POST /api/v1/agents/enroll` | enrollment token | — |
+| `POST /api/v1/scans` | agent token | — |
+| `/actuator/health/**`, `/actuator/prometheus`, `/v3/api-docs/**`, `/swagger-ui/**` | none | — |
+
+A JWT is never accepted on the agent endpoints, and an agent token is never accepted on
+dashboard endpoints. A missing, malformed, expired, wrongly signed or wrong-issuer or
+wrong-audience token is `401` with `WWW-Authenticate: Bearer` and problem+json. A valid
+token without the role is `403` problem+json. If what a credential is checked against is
+unreachable (the JWKS endpoint for a JWT, the database for an agent token), the API
+answers `503` problem+json: the credential may be valid, so it must not be a `401`. Like
+`500`, this generic server-side condition isn't listed per operation in the OpenAPI
+document. Log the actor's `sub` and `preferred_username` on every decommission
+(structured audit log line), never the token.
+
+CORS (only relevant to the Vite dev server, since production is same-origin) allows
+`GET` and `DELETE` with the `Authorization` header.
+
+**Decommission** (`DELETE /api/v1/hosts/{hostId}`): deletes the host and, in the same
+transaction, its scans, results and drift events. Its agent token stops working
+immediately. Increments `driftwatch_hosts_decommissioned_total`, and the host's per-host
+metric series disappear on the next gauge refresh.
+
+**Web runtime configuration.** nginx serves `GET /config.json`, rendered at container
+start from env: `{"oidc":{"authority":"<OIDC_AUTHORITY>","clientId":"<OIDC_CLIENT_ID>"}}`.
+Defaults: `OIDC_AUTHORITY=http://localhost:8400/auth/realms/driftwatch`,
+`OIDC_CLIENT_ID=driftwatch-web`. nginx also proxies the `/auth/` prefix to
+`KEYCLOAK_UPSTREAM` (default `http://keycloak:8080`) with `X-Forwarded-*` headers. The
+SPA uses Authorization Code + PKCE (e.g. `oidc-client-ts`), keeps tokens out of
+`localStorage`, renews silently, sends `Authorization: Bearer` on every API call, and
+re-authenticates on 401. Admin-only UI (decommission) is hidden for viewers, but the API
+is the enforcement point. Redirect paths: `/signin-callback` (sign-in) and
+`/silent-renew.html` (silent renew iframe). At the dashboard origin, `/auth/admin` and
+`/auth/realms/master`, with or without anything after them, return `404`, so the
+Keycloak admin console isn't exposed there; reach it by port-forwarding Keycloak
+directly. nginx forwards `X-Forwarded-*` headers it receives (to keep what an ingress
+such as Traefik set), so where nginx is the edge (compose), a client can choose the
+address Keycloak logs for it. Keycloak's URLs are pinned by `KC_HOSTNAME`, and brute-force
+protection counts failures per user, so neither depends on these headers. nginx serves `/config.json` with
+`Cache-Control: no-store` and writes it only under `/tmp` or `/etc/nginx/conf.d`, the
+image's two writable paths (uid 101). With a read-only root FS, Kubernetes mounts
+`emptyDir`s there; a Docker tmpfs there would need `uid=101,gid=101`. Mock mode (`dev:mock`) bypasses login with a fake user whose
+role can be switched for demos.
+
+### Per-host metrics (API)
+
+Refreshed on the existing gauge schedule (15 s). Label `hostname` is for humans and
+`host_id` for identity. Cardinality is one series per host per metric, which is
+acceptable for fleets of hundreds of hosts (document this).
+
+- `driftwatch_host_score{host_id,hostname}`: latest scan's score. No series while the score is null.
+- `driftwatch_host_last_seen_timestamp_seconds{host_id,hostname}`: Unix seconds.
+- `driftwatch_host_failing_checks{host_id,hostname,severity}`: FAIL + ERROR on the latest scan; all four severities present (0 when none). Absent until the host's first scan.
+- `driftwatch_host_drift_events_total{host_id,hostname,direction}`: counter, incremented on
+  ingest next to the fleet-wide `driftwatch_drift_events_total{direction}` (which stays), so
+  `DriftwatchComplianceRegression` can name the host. In-process, so it resets when the API
+  restarts; alert on `increase()`. All three directions are registered at 0 for every host
+  (on enrollment and on each gauge refresh) before any increment, because `increase()`
+  can't see the first increment of a series it never saw at 0. Removed from the registry
+  on decommission.
+- `driftwatch_hosts_decommissioned_total`: counter.
+
+### Alerts (observability team)
+
+Prometheus scrapes job `driftwatch-api` at `api:8080/actuator/prometheus` every 15 s.
+Rule group `driftwatch`. Every alert has labels `severity` and annotations `summary`,
+`description` and `runbook_url` (pointing into `deploy/observability/RUNBOOK.md` on GitHub).
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `DriftwatchApiDown` | the API target is down for 1m | critical |
+| `DriftwatchHostNotReporting` | a host's last-seen is more than 10 minutes old, for 2m | warning |
+| `DriftwatchCriticalControlFailing` | a host fails at least one critical check, for 5m | critical |
+| `DriftwatchHostComplianceLow` | a host's score is below 70, for 15m | warning |
+| `DriftwatchComplianceRegression` | a host had a REGRESSED drift event in the last 10m (one alert per host) | info |
+
+Each alert needs `promtool test rules` cases proving it fires and doesn't fire. The demo
+stack must visibly fire at least `DriftwatchCriticalControlFailing` (debian-legacy) and
+`DriftwatchComplianceRegression` (alpine-drifting). Alertmanager routes by severity to a
+webhook receiver that logs alerts, so they're observable locally. Grafana gets a
+provisioned Prometheus datasource and a "Driftwatch fleet compliance" dashboard. The
+observability stack lives in `deploy/observability/compose.yml` under the compose profile
+`observability`, which the root `docker-compose.yml` `include:`s:
+`docker compose --profile observability up`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRAFANA_ADMIN_USER` | `admin` | Grafana admin login (observability profile only) |
+| `GRAFANA_ADMIN_PASSWORD` | `driftwatch-demo` | Grafana admin password; demo value for the localhost-bound stack, override it anywhere else |
+
+### Kubernetes (k3d + Helm)
+
+- Two charts:
+  - `deploy/helm/driftwatch`, the control plane: api, web, Keycloak in dev mode
+    (`keycloak.enabled`), Postgres StatefulSet (`postgresql.enabled`, else an external DB
+    via values and an existing Secret).
+  - `deploy/helm/driftwatch-agent`, the node agent DaemonSet, installed into its own
+    namespace because it needs a read-only hostPath mount of `/`.
+- The control-plane namespace enforces Pod Security `restricted`: non-root, seccomp
+  `RuntimeDefault`, read-only root FS (with `emptyDir` where writes are needed), all
+  capabilities dropped, no privilege escalation. Every container has requests, limits and
+  probes. NetworkPolicies are default-deny with explicit allows. The api has a
+  PodDisruptionBudget. Secrets (enrollment token, DB password) come from values or an
+  existing Secret, never hard-coded in templates. Optional ServiceMonitor, gated on the CRD
+  existing.
+- The agent DaemonSet mounts only what the checks read, read-only: the node's `/etc`,
+  `/usr/lib` (the `os-release` symlink target; `mountUsrLib: false` for node images
+  without one, as in k3d) and `/proc`, under `/host`, with
+  `DRIFTWATCH_ROOT=/host`, `DRIFTWATCH_PROC=/host/proc`, and state in hostPath
+  `/var/lib/driftwatch` (identity survives pod restarts). Not mounting `/` keeps kubelet's
+  pod volumes (other pods' Secrets) out of view. The container runs as root with every
+  capability dropped except `DAC_READ_SEARCH` (`/etc/shadow` is mode 0000 on RHEL-family
+  systems), so its namespace is Pod Security `privileged` (hostPath requires it). The
+  hostname comes from `/host/etc/hostname`, i.e. the node name. Its server URL is the
+  in-cluster API service.
+- `hostNetwork` defaults to `false`, so NetworkPolicies apply to the agent. The trade-off:
+  network sysctls (`net.ipv4.*`) are per network namespace, so the four `network.*`
+  checks then report the pod's namespace, not the node's. `hostNetwork: true` reports
+  the node's values, and the control plane must then admit node addresses
+  (`networkPolicy.api.extraIngress`).
+- Images: `ghcr.io/tahausama210/driftwatch-{api,web,agent}`. Locally they're built as
+  `:dev` and imported with `k3d image import`.
+- Values the Terraform control plane relies on: `publicUrl` (sets the issuer and redirect
+  base), `enrollment.existingSecret`, and an empty `ingress.host` meaning "match any
+  host". The chart's NetworkPolicies must admit traffic that enters through the k3s
+  Traefik ingress from outside the cluster.
+- Local cluster: k3d cluster `driftwatch` (1 server + 2 agent nodes), pinned
+  `rancher/k3s` image (at least two weeks old), load balancer `127.0.0.1:38080:80`, API
+  `127.0.0.1:36443`. The issuer in k3d is `http://localhost:38080/auth/realms/driftwatch`.
+- Commands: `helm lint` and `helm unittest` (pinned plugin) for both charts;
+  `helm template … | kubeconform -strict -summary` against Kubernetes 1.36.6 schemas, all
+  run by `scripts/check-helm.sh` with digest-pinned images (Helm 4.3.0, helm-unittest
+  1.2.1, kubeconform 0.8.0);
+  `deploy/k3d/up.sh` (create cluster, build and import images, install both charts,
+  wait), `deploy/k3d/smoke.sh` (readiness through the ingress, viewer token, one enrolled
+  host per node with a scan, dashboard served), `deploy/k3d/down.sh`.
+
+### Terraform (AWS test fleet)
+
+- `infra/terraform/` contains `modules/{network,ssm-instance-role,control-plane,fleet}`
+  (both instance modules share `ssm-instance-role`), a root at `envs/demo`, and
+  `bootstrap/` (S3 state bucket: versioned, encrypted, public access blocked; native S3
+  locking with `use_lockfile`). Terraform `>= 1.10` (`>= 1.11` for `envs/demo`, whose
+  enrollment token is an ephemeral value written to SSM write-only, so it never enters
+  state), AWS provider `~> 6.70`. Commit `.terraform.lock.hcl` with hashes for
+  linux_amd64, darwin_arm64 and windows_amd64.
+- **Never run `plan` or `apply` against AWS.** There are no credentials, and the user
+  chose no real deploy. Verification is `terraform fmt -check -recursive`,
+  `terraform init -backend=false`, `terraform validate`, and `terraform test` with
+  `mock_provider "aws"` in every module. Also `tflint --recursive` with the pinned AWS
+  ruleset, and `trivy config infra/terraform` with no HIGH or CRITICAL findings unless an
+  ignore says why.
+- Security requirements, each asserted by a test:
+  - no SSH: no port 22 ingress and no key pairs; access is through SSM Session Manager
+  - IMDSv2 required
+  - EBS encrypted
+  - the instance profile has only what SSM needs, plus read access to the one
+    enrollment-token parameter
+  - no `0.0.0.0/0` ingress anywhere
+  - the control plane accepts the API port only from the fleet security group and an
+    `admin_cidrs` variable (empty by default)
+- The control plane is one EC2 instance running k3s via cloud-init, installing the chart
+  from `oci://ghcr.io/tahausama210/charts/driftwatch` at a version variable.
+- The fleet is N instances spread across Ubuntu 24.04, Debian 12 and Amazon Linux 2023.
+  AMIs come from the public SSM parameters (no marketplace subscriptions). Cloud-init:
+  - download `driftwatch-agent_<version>_linux_<arch>.tar.gz` from the GitHub release
+  - verify it against `checksums.txt`
+  - read the enrollment token from an SSM SecureString created by Terraform
+  - run the agent as a hardened systemd unit. Unlike the container image (root, read-only
+    host mount), it runs as a transient non-root user with only `CAP_DAC_READ_SEARCH`,
+    which is enough to read `/etc/shadow` and the other checked files.
+- Public subnets with no inbound access and no NAT gateway (cost). A NAT gateway or VPC
+  endpoints are the documented production alternative. HTTP inside the VPC is a
+  documented tradeoff.
+- `infra/terraform/README.md` covers usage, what each test asserts, and how to apply and
+  destroy with your own account. Give no cost figures beyond what can be cited.
+
+### Supply chain and CI (platform team)
+
+- Release artifacts (on a `v*` tag; agents never create tags):
+  - `driftwatch-agent_<version>_linux_{amd64,arm64}.tar.gz`, each containing exactly one
+    `driftwatch-agent` binary plus `LICENSE` and `README.md` (the Terraform installer
+    refuses an archive with zero or several binaries)
+  - `checksums.txt` (sha256, `<sha>  <file>` lines) and an SPDX SBOM, attached to the
+    GitHub Release. Every archive gets a Sigstore-backed GitHub build-provenance and SBOM
+    attestation (`gh attestation verify <archive> --repo TahaUsama210/driftwatch`).
+  - The tag is `v<version>` (e.g. `v0.2.0`), so files are at
+    `https://github.com/TahaUsama210/driftwatch/releases/download/v<version>/<file>`.
+  - images `ghcr.io/tahausama210/driftwatch-{api,web,agent}:<version>`
+  - both charts pushed to `oci://ghcr.io/tahausama210/charts`
+- On push to `main`: images tagged `main` and `sha-<short>`. Images are multi-arch
+  (linux/amd64, linux/arm64). Build stages use `FROM --platform=$BUILDPLATFORM` and
+  cross-compile or produce arch-independent output (Go via `TARGETARCH`, JVM jar, static
+  web assets); the api and web teams update their own Dockerfiles, and the platform team
+  updates `agent/Dockerfile`.
+- Every image gets:
+  - a Trivy scan (fail on fixable HIGH/CRITICAL; SARIF uploaded to code scanning)
+  - an SBOM and build provenance attestations
+  - a cosign keyless signature by digest
+- `trivy config` scans `infra/terraform`, `deploy/helm` and the Dockerfiles.
+- New CI jobs:
+  - terraform: fmt, validate, test, tflint, trivy config
+  - helm: lint, unittest, kubeconform
+  - observability: promtool and amtool checks, rule tests, dashboard JSON validity
+  - kubernetes e2e: k3d up + smoke
+  - the compose e2e, updated for auth
+- Each job gets least-privilege `permissions` (`packages: write`, `id-token: write` and
+  `security-events: write` only where needed).
+- `scripts/smoke.sh` gains auth checks, with tokens from
+  `${WEB_URL}/auth/realms/driftwatch/protocol/openid-connect/token` via client
+  credentials:
+  - an unauthenticated `GET /api/v1/hosts` is `401`
+  - viewer gets `200`
+  - viewer `DELETE` is `403`
+  - admin `DELETE` of a throwaway host the smoke test enrolled itself is `204`, after
+    which that host's agent token gets `401`
+  - the demo hosts are never deleted

@@ -1,26 +1,24 @@
-import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './app/App';
+import { loadOidcAuth, startApp } from './app/bootstrap';
+import type { AuthController } from './auth/types';
 import './styles/index.css';
 
-/** `npm run dev:mock` serves the API from an in-browser MSW worker; other modes hit /api. */
-async function startMockApi(): Promise<void> {
-  if (import.meta.env.MODE !== 'mock') return;
-  const { startMockWorker } = await import('./mocks/browser');
-  await startMockWorker();
+/**
+ * `npm run dev:mock`: the API is served in the browser by MSW and a fake user is signed
+ * in (`?role=admin|viewer|none`). Vite drops this branch, and its chunks, from builds.
+ */
+async function loadMockAuth(): Promise<AuthController> {
+  try {
+    const { startMockWorker } = await import('./mocks/browser');
+    await startMockWorker();
+  } catch (error) {
+    console.error('Driftwatch: the mock API failed to start; requests will go to /api.', error);
+  }
+  const { MockAuth, mockRoleFromSearch } = await import('./auth/mockAuth');
+  return new MockAuth(mockRoleFromSearch(window.location.search));
 }
 
 const container = document.getElementById('root');
 if (!container) throw new Error('Driftwatch: #root element is missing from index.html');
 
-startMockApi()
-  .catch((error: unknown) => {
-    console.error('Driftwatch: the mock API failed to start; requests will go to /api.', error);
-  })
-  .finally(() => {
-    createRoot(container).render(
-      <StrictMode>
-        <App />
-      </StrictMode>,
-    );
-  });
+void startApp(createRoot(container), import.meta.env.MODE === 'mock' ? loadMockAuth : loadOidcAuth);

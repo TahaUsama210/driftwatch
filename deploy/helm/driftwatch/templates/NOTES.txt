@@ -1,0 +1,37 @@
+Driftwatch {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Dashboard:  {{ .Values.publicUrl }}/
+API:        {{ .Values.publicUrl }}/api/v1/  (dashboard JWT required; agents use their own tokens)
+OIDC issuer: {{ include "driftwatch.oidcIssuer" . }}
+
+Wait for the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "driftwatch.componentName" (dict "ctx" . "component" "api") }}
+
+Enrollment token for the driftwatch-agent chart:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "driftwatch.enrollmentSecretName" . }} \
+    -o jsonpath='{.data.{{ include "driftwatch.enrollmentSecretKey" . }}}' | base64 -d
+{{- if .Values.keycloak.enabled }}
+
+WARNING: Keycloak runs in dev mode (start-dev, embedded H2 in an emptyDir). Its state
+is lost on every restart and the realm ships demo secrets. Local clusters only; use an
+external IdP or the Keycloak Operator in production (oidc.issuer, keycloak.enabled=false).
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+
+The bundled Postgres is a single instance without backups. Production should use
+externalDatabase with postgresql.enabled=false.
+{{- end }}
+{{- $ns := lookup "v1" "Namespace" "" .Release.Namespace }}
+{{- if $ns }}
+{{- if ne (dig "metadata" "labels" "pod-security.kubernetes.io/enforce" "" $ns) "restricted" }}
+
+WARNING: namespace {{ .Release.Namespace }} does not enforce Pod Security "restricted".
+Every pod in this chart complies; enforce it so nothing else in the namespace can be weaker:
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=restricted
+{{- end }}
+{{- end }}
+{{- if and .Values.metrics.serviceMonitor.enabled (not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1")) }}
+
+NOTE: metrics.serviceMonitor.enabled is true, but the cluster has no monitoring.coreos.com/v1
+API (Prometheus Operator CRDs), so no ServiceMonitor was created.
+{{- end }}

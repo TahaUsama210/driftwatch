@@ -1,0 +1,4 @@
+# Resolve `source` directives relative to the script that contains them, so
+# `shellcheck scripts/*.sh` follows scripts/lib/ without extra flags.
+source-path=SCRIPTDIR
+external-sources=true

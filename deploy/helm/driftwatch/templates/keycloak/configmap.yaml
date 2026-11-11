@@ -1,0 +1,15 @@
+{{- if .Values.keycloak.enabled }}
+{{- $component := dict "ctx" . "component" "keycloak" -}}
+# The realm export shared with docker compose, plus publicUrl as a redirect URI (see
+# driftwatch.realm). It holds only the demo client secrets and passwords documented in
+# docs/CONTRACTS.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "driftwatch.componentName" (dict "ctx" . "component" "keycloak-realm") }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+data:
+  driftwatch-realm.json: |-
+    {{- include "driftwatch.realm" . | nindent 4 }}
+{{- end }}

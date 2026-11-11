@@ -1,0 +1,21 @@
+# Trivy exceptions. Each entry is scoped to the files it applies to and says why it is
+# acceptable; scripts/trivy.sh passes this file to every scan. Paths are relative to
+# the scan target, which for the Dockerfile scan is the repository root.
+
+misconfigurations:
+  - id: DS002
+    paths:
+      - agent/Dockerfile
+      - deploy/hosts/*/Dockerfile
+    statement: >-
+      The compliance agent must run as root: the accounts.* checks read /etc/shadow and
+      the permission checks must see real ownership. The host's root filesystem is
+      mounted read-only into it. docs/CONTRACTS.md records this decision.
+  - id: KSV121
+    paths:
+      - templates/daemonset.yaml
+    statement: >-
+      Only the driftwatch-agent chart has a DaemonSet (scanned with the chart directory as
+      the target). It mounts the node's /etc, /proc and /usr/lib read-only because those
+      are the files the compliance checks audit; it does not mount /. Its namespace is Pod
+      Security privileged and holds nothing else. docs/CONTRACTS.md records this decision.

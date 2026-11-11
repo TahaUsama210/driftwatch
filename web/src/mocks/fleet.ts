@@ -342,7 +342,7 @@ export interface MockFleetOptions {
 }
 
 export class MockFleet {
-  private readonly hosts: MockHost[];
+  private hosts: MockHost[];
   private readonly now: () => number;
 
   constructor({ hosts, anchor, now = () => Date.now() }: MockFleetOptions) {
@@ -462,6 +462,12 @@ export class MockFleet {
       size,
       totalItems: hosts.length,
     };
+  }
+
+  /** Removes the host; its scans, results and events go with it (they are derived). */
+  decommission(hostId: string): void {
+    const host = this.host(hostId);
+    this.hosts = this.hosts.filter((candidate) => candidate !== host);
   }
 
   getHost(hostId: string): Host {

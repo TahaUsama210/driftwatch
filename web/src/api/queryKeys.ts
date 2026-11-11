@@ -18,6 +18,7 @@ export const queryKeys = {
   },
   hosts: {
     all: hosts,
+    lists: () => [...hosts, 'list'] as const,
     list: (query: HostListQuery) => [...hosts, 'list', query] as const,
     detail: (hostId: string) => [...hosts, 'detail', hostId] as const,
     scans: (hostId: string, limit: number) => [...hosts, 'detail', hostId, 'scans', limit] as const,

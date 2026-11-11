@@ -49,7 +49,7 @@ class ScanIngestController {
             @Valid @RequestBody ScanReport report) {
         // Timed here rather than inside the service so the measurement includes the commit.
         IngestResult result = metrics.timeIngest(() -> ingestService.ingest(agent, report));
-        metrics.recordDriftEvents(result.driftEvents());
+        metrics.recordDriftEvents(agent.hostId(), report.host().hostname(), result.driftEvents());
         return result.created()
                 ? ResponseEntity.created(
                                 URI.create("/api/v1/scans/" + result.summary().id()))

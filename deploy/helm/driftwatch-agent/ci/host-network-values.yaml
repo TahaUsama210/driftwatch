@@ -1,0 +1,4 @@
+# hostNetwork agent reading its token from an existing Secret (no NetworkPolicy).
+enrollment:
+  existingSecret: driftwatch-enrollment
+hostNetwork: true

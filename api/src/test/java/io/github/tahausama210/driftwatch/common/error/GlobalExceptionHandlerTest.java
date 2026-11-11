@@ -64,9 +64,11 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    void anUnavailableCredentialStoreIsAServerErrorNotAnAuthenticationFailure() throws Exception {
+    void anUnavailableCredentialStoreIsARetryableServiceUnavailableNotAnAuthenticationFailure() throws Exception {
         mvc.perform(get("/credential-store-down"))
-                .andExpect(status().isInternalServerError())
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.status").value(503))
                 .andExpect(content().string(not(containsString("connection refused"))));
     }
 }

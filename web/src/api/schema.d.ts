@@ -116,7 +116,14 @@ export interface paths {
         get: operations["getHost"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Decommission a host (admin only).
+         * @description Permanently deletes the host with its scans, results and drift events, and
+         *     revokes its agent token. An agent that is still running re-enrolls on its next
+         *     submission and comes back as a new host, so stop the agent first. Requires the
+         *     `admin` role.
+         */
+        delete: operations["decommissionHost"];
         options?: never;
         head?: never;
         patch?: never;
@@ -495,6 +502,15 @@ export interface components {
                 "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /** @description Authenticated, but the token lacks the required role. */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
         /** @description Resource not found. */
         NotFound: {
             headers: {
@@ -622,6 +638,8 @@ export interface operations {
                     "application/json": components["schemas"]["FleetSummary"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getFleetTrend: {
@@ -646,6 +664,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     listHosts: {
@@ -675,6 +695,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getHost: {
@@ -697,6 +719,31 @@ export interface operations {
                     "application/json": components["schemas"]["Host"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    decommissionHost: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                hostId: components["parameters"]["HostId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Host and its history deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -723,6 +770,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -750,6 +799,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -773,6 +824,8 @@ export interface operations {
                     "application/json": components["schemas"]["ScanDetail"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -794,6 +847,8 @@ export interface operations {
                     "application/json": components["schemas"]["CheckSummary"][];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
     getCheck: {
@@ -816,6 +871,8 @@ export interface operations {
                     "application/json": components["schemas"]["CheckDetail"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -842,6 +899,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
         };
     };
 }

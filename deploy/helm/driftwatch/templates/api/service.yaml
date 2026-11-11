@@ -1,0 +1,16 @@
+{{- $component := dict "ctx" . "component" "api" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "driftwatch.componentName" $component }}
+  labels:
+    {{- include "driftwatch.labels" $component | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "driftwatch.selectorLabels" $component | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
