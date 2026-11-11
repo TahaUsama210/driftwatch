@@ -101,7 +101,7 @@ services:
 
   grafana:
     <<: *hardened
-    image: grafana/grafana:13.2.4
+    image: grafana/grafana:13.3.0
     profiles: [observability]
     environment:
       # Demo defaults only; set both in .env for anything reachable by other people.

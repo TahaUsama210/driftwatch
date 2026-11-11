@@ -94,7 +94,7 @@ services:
   # Identity provider for the dashboard. Reached only through the web container at
   # http://localhost:8400/auth, so it publishes no port of its own.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.8.1
+    image: quay.io/keycloak/keycloak:26.8.2-1
     command: ["start-dev", "--import-realm"]
     restart: unless-stopped
     environment:
