@@ -15,7 +15,7 @@ COPY . .
 RUN npm run build
 
 # ---- runtime ----------------------------------------------------------------
-FROM nginxinc/nginx-unprivileged:1.30.6-alpine3.24
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine3.24
 
 # Pick up Alpine security fixes released since the base image was built (the CI image
 # scan fails on fixable HIGH/CRITICAL CVEs); the base tag itself is bumped by Dependabot.
