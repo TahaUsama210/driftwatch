@@ -5,7 +5,7 @@
 # Runs on the build machine's own platform even for a multi-arch build: the jar is bytecode, the
 # same for every target, so Maven never runs under QEMU emulation. Only the runtime stage below is
 # per target platform.
-FROM --platform=$BUILDPLATFORM eclipse-temurin:25.0.4_7-jdk-alpine AS build
+FROM --platform=$BUILDPLATFORM eclipse-temurin:25.0.4.1_1-jdk-alpine AS build
 WORKDIR /workspace
 
 COPY --chmod=0755 mvnw ./
@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.m2 \
  && java -Djarmode=tools -jar target/driftwatch-api-*.jar extract --layers --launcher --destination target/extracted
 
 # ---- Runtime: JRE only, unprivileged ----
-FROM eclipse-temurin:25.0.4_7-jre-alpine
+FROM eclipse-temurin:25.0.4.1_1-jre-alpine
 
 # Apply Alpine security fixes published after the base image was built: CI's image scan fails on
 # any fixable HIGH or CRITICAL CVE. Then a fixed, non-root UID/GID; the process needs no Linux
